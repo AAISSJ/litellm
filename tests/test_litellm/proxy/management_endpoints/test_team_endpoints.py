@@ -2447,6 +2447,88 @@ async def test_update_team_with_team_member_budget_duration():
         assert "team_member_budget_duration" not in update_data
 
 
+@pytest.mark.parametrize(
+    "partial_update",
+    [
+        {"team_member_tpm_limit": 500},
+        {"team_member_budget": 50.0},
+        {"team_member_key_duration": "7d"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_team_update_partial_metadata_field_preserves_stored_metadata(
+    partial_update,
+):
+    """
+    A /team/update that writes a metadata-backed field without resending `metadata`
+    must not wipe the rest of the stored metadata.
+
+    Regression test for LIT-5150.
+    """
+    from litellm.proxy._types import LiteLLM_BudgetTable
+    from litellm.proxy.management_endpoints.team_endpoints import update_team
+
+    stored_metadata = {
+        "team_member_budget_id": "budget-existing-123",
+        "team_member_key_duration": "30d",
+        "logging": [{"callback_name": "langfuse", "callback_type": "success"}],
+        "guardrails": ["presidio-pii"],
+        "cost_center": "cc-1234",
+    }
+
+    existing_team_row = LiteLLM_TeamTable(
+        team_id="team-abc",
+        team_alias="team-abc-alias",
+        metadata=dict(stored_metadata),
+        members_with_roles=[],
+    )
+
+    mock_prisma_client = MagicMock()
+    mock_prisma_client.db.litellm_teamtable.find_unique = AsyncMock(
+        return_value=existing_team_row
+    )
+    mock_prisma_client.db.litellm_teamtable.update = AsyncMock(
+        return_value=existing_team_row
+    )
+    mock_prisma_client.jsonify_team_object = MagicMock(side_effect=lambda db_data: db_data)
+
+    with (
+        patch("litellm.proxy.proxy_server.prisma_client", mock_prisma_client),
+        patch("litellm.proxy.proxy_server.llm_router", None),
+        patch("litellm.proxy.proxy_server.user_api_key_cache", MagicMock()),
+        patch("litellm.proxy.proxy_server.proxy_logging_obj", MagicMock()),
+        patch("litellm.proxy.proxy_server.litellm_proxy_admin_name", "admin"),
+        patch(
+            "litellm.proxy.management_endpoints.team_endpoints._refresh_cached_team",
+            AsyncMock(),
+        ),
+        patch(
+            "litellm.proxy.management_endpoints.budget_management_endpoints.update_budget",
+            AsyncMock(
+                return_value=LiteLLM_BudgetTable(budget_id="budget-existing-123")
+            ),
+        ),
+    ):
+        await update_team(
+            data=UpdateTeamRequest(team_id="team-abc", **partial_update),
+            http_request=MagicMock(),
+            user_api_key_dict=UserAPIKeyAuth(
+                user_role=LitellmUserRoles.PROXY_ADMIN, user_id="admin"
+            ),
+        )
+
+    written_metadata = mock_prisma_client.db.litellm_teamtable.update.call_args[1]["data"][
+        "metadata"
+    ]
+    for key, value in stored_metadata.items():
+        if key in partial_update:
+            continue
+        assert written_metadata[key] == value, f"{key} was dropped from team metadata"
+    assert written_metadata["team_member_budget_id"] == "budget-existing-123"
+    if "team_member_key_duration" in partial_update:
+        assert written_metadata["team_member_key_duration"] == partial_update["team_member_key_duration"]
+
+
 @pytest.mark.asyncio
 async def test_backfill_team_member_budget_entries_creates_missing_memberships():
     """

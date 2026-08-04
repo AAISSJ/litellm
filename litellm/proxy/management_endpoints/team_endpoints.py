@@ -10,6 +10,7 @@ All /team management endpoints
 """
 
 import asyncio
+import copy
 import json
 import math
 import traceback
@@ -439,6 +440,9 @@ class TeamMemberBudgetHandler:
 
         if team_table.metadata is None:
             team_table.metadata = {}
+
+        if updated_kv.get("metadata") is None:
+            updated_kv["metadata"] = copy.deepcopy(team_table.metadata)
 
         team_member_budget_id = team_table.metadata.get("team_member_budget_id")
         if team_member_budget_id is not None and isinstance(team_member_budget_id, str):
@@ -2016,6 +2020,20 @@ async def update_team(
                 data_json=updated_kv,
                 existing_team_row=existing_team_row,
             )
+
+        _writes_metadata_backed_field = any(
+            field in updated_kv
+            for field in (
+                *LiteLLM_ManagementEndpoint_MetadataFields,
+                *LiteLLM_ManagementEndpoint_MetadataFields_Premium,
+            )
+        )
+        if (
+            "metadata" not in updated_kv
+            and _writes_metadata_backed_field
+            and isinstance(existing_team_row.metadata, dict)
+        ):
+            updated_kv["metadata"] = copy.deepcopy(existing_team_row.metadata)
 
         # update team metadata fields
         _update_metadata_fields(updated_kv=updated_kv)

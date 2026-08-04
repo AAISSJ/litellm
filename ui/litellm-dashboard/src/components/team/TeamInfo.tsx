@@ -974,6 +974,7 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
                       team_member_rpm_limit: info.team_member_budget_table?.rpm_limit,
                       team_member_budget: info.team_member_budget_table?.max_budget,
                       team_member_budget_duration: info.team_member_budget_table?.budget_duration,
+                      team_member_key_duration: info.metadata?.team_member_key_duration,
                       guardrails: effectiveGuardrails,
                       policies: info.policies || [],
                       disable_global_guardrails: info.metadata?.disable_global_guardrails || false,
