@@ -2502,6 +2502,7 @@ async def test_team_update_partial_metadata_field_preserves_stored_metadata(
         patch("litellm.proxy.proxy_server.user_api_key_cache", MagicMock()),
         patch("litellm.proxy.proxy_server.proxy_logging_obj", MagicMock()),
         patch("litellm.proxy.proxy_server.litellm_proxy_admin_name", "admin"),
+        patch("litellm.proxy.proxy_server.premium_user", True),
         patch(
             "litellm.proxy.management_endpoints.team_endpoints._refresh_cached_team",
             AsyncMock(),
