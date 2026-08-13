@@ -41,9 +41,11 @@ from litellm.types.utils import (
 
 if TYPE_CHECKING:
     from langfuse import Langfuse
+    from opentelemetry.context import Context
 
     from litellm.litellm_core_utils.litellm_logging import DynamicLoggingCache
 else:
+    Context = Any
     DynamicLoggingCache = Any
     StatefulTraceClient = Any
     Langfuse = Any
@@ -138,22 +140,26 @@ _GENERATION_ONLY_KEYS: Final = frozenset(
 )
 
 
-def _trace_attributes_for_propagation(trace_params: dict) -> dict:
+def _trace_attributes_for_propagation(trace_params: Mapping[str, object]) -> Mapping[str, object]:
     """Trace-level fields in v4 are propagated onto the observations, not set on a trace object."""
-    return {
-        propagated: trace_params[key]
-        for key, propagated in _PROPAGATED_TRACE_KEYS.items()
-        if trace_params.get(key) is not None
-    }
+    return MappingProxyType(
+        {
+            propagated: trace_params[key]
+            for key, propagated in _PROPAGATED_TRACE_KEYS.items()
+            if trace_params.get(key) is not None
+        }
+    )
 
 
-def _generation_attributes(generation_params: dict) -> dict:
+def _generation_attributes(generation_params: Mapping[str, object]) -> Mapping[str, object]:
     """Drop what the v4 wrapper cannot take: ids it generates, and timings set on the span itself.
 
     ``usage`` is the v2 shape that v4 replaced with ``usage_details``, which the
     caller already builds alongside it.
     """
-    return {key: value for key, value in generation_params.items() if key not in _GENERATION_ONLY_KEYS}
+    return MappingProxyType(
+        {key: value for key, value in generation_params.items() if key not in _GENERATION_ONLY_KEYS}
+    )
 
 
 def resolve_langfuse_credentials(
@@ -761,6 +767,7 @@ class LangFuseLogger:
                 "output": output if not mask_output else "redacted-by-litellm",
                 "usage": usage,
                 "usage_details": usage_details,
+                # mutable-ok: langfuse serializes this payload, a proxy is not json-encodable
                 "metadata": {
                     **(trace_params.get("metadata") or {}),
                     **log_requester_metadata(redact_user_api_key_info(metadata=allowlisted_metadata)),
@@ -966,7 +973,7 @@ class LangFuseLogger:
     def _log_guardrail_information_as_span(
         self,
         client: "Langfuse",
-        context: Any,
+        context: "Context",
         standard_logging_object: StandardLoggingPayload | None,
     ):
         """
@@ -1003,7 +1010,7 @@ class LangFuseLogger:
                 context=context,
                 name="guardrail",
                 start_time=guardrail_entry.get("start_time", None),
-                attributes={
+                attributes={  # mutable-ok: langfuse serializes this payload, a proxy is not json-encodable
                     "input": guardrail_entry.get("guardrail_request", None),
                     "output": guardrail_entry.get("guardrail_response", None),
                     "metadata": {
@@ -1094,8 +1101,8 @@ def _add_prompt_to_generation_params(
 def log_provider_specific_information_as_span(
     *,
     client: "Langfuse",
-    context: Any,
-    clean_metadata: dict,
+    context: "Context",
+    clean_metadata: Mapping[str, object],
 ):
     """
     Logs provider-specific information as spans.
@@ -1134,7 +1141,13 @@ def log_provider_specific_information_as_span(
 def _end_grounding_span(*, client: "Langfuse", context: "Context", name: str, value: object) -> None:
     from litellm.integrations.langfuse.langfuse_sdk import start_child_span
 
-    start_child_span(client=client, context=context, name=name, start_time=None, attributes={"input": value}).end()
+    start_child_span(
+        client=client,
+        context=context,
+        name=name,
+        start_time=None,
+        attributes={"input": value},  # mutable-ok: langfuse serializes this payload
+    ).end()
 
 
 def log_requester_metadata(clean_metadata: Mapping[str, Any]):
