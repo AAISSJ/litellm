@@ -98,9 +98,9 @@ def test_guardrail_span_with_float_timestamps_does_not_break_the_generation(clie
     lf, exporter = client
     context, claim_root = open_trace_context(client=lf, trace_id="9" * 32, parent_observation_id=None)
     guardrail_start = 1709294400.0
-    start_child_span(
-        client=lf, context=context, name="guardrail", start_time=guardrail_start, attributes={}
-    ).end(end_time=to_unix_nanos(guardrail_start + 2))
+    start_child_span(client=lf, context=context, name="guardrail", start_time=guardrail_start, attributes={}).end(
+        end_time=to_unix_nanos(guardrail_start + 2)
+    )
     start_generation(
         client=lf, context=context, name="gen", start_time=CALL_START, claim_trace_root=claim_root, attributes={}
     ).end(end_time=to_unix_nanos(CALL_END))
@@ -139,9 +139,9 @@ def test_child_span_keeps_its_own_window_and_stays_a_sibling(client):
     lf, exporter = client
     context, claim_root = open_trace_context(client=lf, trace_id="d" * 32, parent_observation_id=None)
     guardrail_start = CALL_START + timedelta(seconds=1)
-    start_child_span(
-        client=lf, context=context, name="guardrail", start_time=guardrail_start, attributes={}
-    ).end(end_time=to_unix_nanos(guardrail_start + timedelta(seconds=2)))
+    start_child_span(client=lf, context=context, name="guardrail", start_time=guardrail_start, attributes={}).end(
+        end_time=to_unix_nanos(guardrail_start + timedelta(seconds=2))
+    )
     start_generation(
         client=lf, context=context, name="gen", start_time=CALL_START, claim_trace_root=claim_root, attributes={}
     ).end(end_time=to_unix_nanos(CALL_END))
@@ -295,18 +295,14 @@ def test_client_does_not_take_over_the_process_tracer_provider():
     assert client._resources.tracer_provider is not provider_before
     active = getattr(provider_before, "_active_span_processor", None)
     if active is not None:
-        assert not any(
-            "Langfuse" in type(processor).__name__ for processor in active._span_processors
-        )
+        assert not any("Langfuse" in type(processor).__name__ for processor in active._span_processors)
 
 
 def test_rotated_credentials_replace_the_cached_client():
     original = _lifecycle_client(secret_key="sk-original", host="http://127.0.0.1:1")
     original_resources = original._resources
 
-    evict_stale_langfuse_resources(
-        public_key=PUBLIC_KEY, secret_key="sk-rotated", base_url="http://127.0.0.1:2"
-    )
+    evict_stale_langfuse_resources(public_key=PUBLIC_KEY, secret_key="sk-rotated", base_url="http://127.0.0.1:2")
     rotated = _lifecycle_client(secret_key="sk-rotated", host="http://127.0.0.1:2")
 
     assert rotated._resources is not original_resources
@@ -316,9 +312,7 @@ def test_rotated_credentials_replace_the_cached_client():
 
 def test_unchanged_credentials_keep_the_cached_client():
     original = _lifecycle_client()
-    evict_stale_langfuse_resources(
-        public_key=PUBLIC_KEY, secret_key="sk-original", base_url="http://127.0.0.1:1"
-    )
+    evict_stale_langfuse_resources(public_key=PUBLIC_KEY, secret_key="sk-original", base_url="http://127.0.0.1:1")
     assert LangfuseResourceManager._instances.get(PUBLIC_KEY) is original._resources
 
 
@@ -368,9 +362,7 @@ def test_shutdown_deregisters_so_a_later_client_is_not_a_corpse():
 def test_shutdown_of_a_stale_client_does_not_deregister_the_live_one():
     stale = _lifecycle_client(secret_key="sk-original", host="http://127.0.0.1:1")
     stale_resources = stale._resources
-    evict_stale_langfuse_resources(
-        public_key=PUBLIC_KEY, secret_key="sk-rotated", base_url="http://127.0.0.1:2"
-    )
+    evict_stale_langfuse_resources(public_key=PUBLIC_KEY, secret_key="sk-rotated", base_url="http://127.0.0.1:2")
     live = _lifecycle_client(secret_key="sk-rotated", host="http://127.0.0.1:2")
 
     shutdown_langfuse_client(stale)

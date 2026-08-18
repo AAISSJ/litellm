@@ -239,10 +239,10 @@ class LangFuseLogger:
             verbose_logger.debug("Langfuse Mock: Using mock project ID")
         else:
             try:
-                project_id = self.Langfuse.api.projects.get().data[0].id
+                project_id: Final = self.Langfuse.api.projects.get().data[0].id
                 os.environ["LANGFUSE_PROJECT_ID"] = project_id
             except Exception:
-                project_id = None
+                pass
 
         if os.getenv("UPSTREAM_LANGFUSE_SECRET_KEY") is not None:
             upstream_langfuse_debug_env: Final = os.getenv("UPSTREAM_LANGFUSE_DEBUG")
@@ -705,7 +705,6 @@ class LangFuseLogger:
             generation_id = None
             usage = None
             usage_details = None
-            cost_details = None
             if response_obj is not None:
                 if hasattr(response_obj, "id") and response_obj.get("id", None) is not None:
                     generation_id = litellm.utils.get_logging_id(start_time, response_obj)
@@ -726,7 +725,6 @@ class LangFuseLogger:
                         "completion_tokens": completion_tokens,
                         "total_cost": cost,
                     }
-                    cost_details = {"total": cost} if isinstance(cost, (int, float)) else None
                     # According to langfuse documentation: "the input value must be reduced by the number of cache_read_input_tokens"
                     input_tokens: Final = prompt_tokens - cache_read_input_tokens
                     usage_details = LangfuseUsageDetails(
@@ -769,9 +767,10 @@ class LangFuseLogger:
                 "output": output if not mask_output else "redacted-by-litellm",
                 "usage": usage,
                 "usage_details": usage_details,
-                "cost_details": cost_details,
-                # mutable-ok: langfuse serializes this payload, a proxy is not json-encodable
-                "metadata": {
+                "cost_details": {"total": cost}  # mutable-ok: langfuse serializes this payload
+                if usage is not None and isinstance(cost, (int, float))
+                else None,
+                "metadata": {  # mutable-ok: langfuse serializes this payload, a proxy is not json-encodable
                     **(trace_params.get("metadata") or {}),
                     **log_requester_metadata(redact_user_api_key_info(metadata=allowlisted_metadata)),
                     **enrichments,
@@ -815,7 +814,7 @@ class LangFuseLogger:
                     parent_observation_id=resolve_observation_id(parent_observation_id),
                 )
                 log_provider_specific_information_as_span(
-                    client=self.Langfuse, context=trace_context, clean_metadata=clean_metadata
+                    client=self.Langfuse, context=trace_context, enrichments=enrichments
                 )
                 self._log_guardrail_information_as_span(
                     client=self.Langfuse,
@@ -1102,20 +1101,20 @@ def log_provider_specific_information_as_span(
     *,
     client: "Langfuse",
     context: "Context",
-    clean_metadata: Mapping[str, object],
+    enrichments: Mapping[str, Any],
 ):
     """
     Logs provider-specific information as spans.
 
     Parameters:
         trace: The tracing object used to log spans.
-        clean_metadata: A dictionary containing metadata to be logged.
+        enrichments: The litellm-computed fields on the emitted payload.
 
     Returns:
         None
     """
 
-    _hidden_params: Final = clean_metadata.get("hidden_params", None)
+    _hidden_params: Final = enrichments.get("hidden_params", None)
     if _hidden_params is None:
         return
 
