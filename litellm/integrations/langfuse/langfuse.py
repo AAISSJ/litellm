@@ -47,7 +47,6 @@ if TYPE_CHECKING:
 else:
     Context = Any
     DynamicLoggingCache = Any
-    StatefulTraceClient = Any
     Langfuse = Any
 
 
@@ -242,7 +241,7 @@ class LangFuseLogger:
                 project_id: Final = self.Langfuse.api.projects.get().data[0].id
                 os.environ["LANGFUSE_PROJECT_ID"] = project_id
             except Exception:
-                pass
+                verbose_logger.debug("Langfuse project id unavailable, alerting links will omit it")
 
         if os.getenv("UPSTREAM_LANGFUSE_SECRET_KEY") is not None:
             upstream_langfuse_debug_env: Final = os.getenv("UPSTREAM_LANGFUSE_DEBUG")
