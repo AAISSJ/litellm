@@ -278,6 +278,7 @@ class LangFuseLogger:
                 f"Max langfuse clients reached: {litellm.initialized_langfuse_clients} is greater than {MAX_LANGFUSE_INITIALIZED_CLIENTS}"
             )
         from litellm.integrations.langfuse.langfuse_sdk import (
+            DiscardingSpanExporter,
             build_isolated_tracer_provider,
             evict_stale_langfuse_resources,
         )
@@ -293,6 +294,7 @@ class LangFuseLogger:
                 environment=os.getenv("LANGFUSE_TRACING_ENVIRONMENT"),
                 release=parameters.get("release"),
             ),
+            span_exporter=DiscardingSpanExporter() if self.is_mock_mode else None,
         )
         litellm.initialized_langfuse_clients += 1
         verbose_logger.debug("Created langfuse client number %s", litellm.initialized_langfuse_clients)

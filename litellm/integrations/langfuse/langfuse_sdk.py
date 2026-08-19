@@ -13,10 +13,12 @@ from langfuse._client.resource_manager import LangfuseResourceManager
 from opentelemetry.context import Context
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 __all__ = (
     "AS_ROOT_ATTRIBUTE",
     "RELEASE_ATTRIBUTE",
+    "DiscardingSpanExporter",
     "build_isolated_tracer_provider",
     "evict_stale_langfuse_resources",
     "open_trace_context",
@@ -157,6 +159,24 @@ def build_isolated_tracer_provider(*, environment: str | None, release: str | No
         }
     )
     return TracerProvider(resource=Resource.create(dict(attributes)))
+
+
+class DiscardingSpanExporter(SpanExporter):
+    """Accept and drop every span, for mock mode.
+
+    The mock intercepts the httpx client langfuse used to take, but v4 ships
+    observations through its own OTLP exporter, so without this the "no network
+    calls" contract silently sends real traces to the configured host.
+    """
+
+    def export(self, spans: object) -> SpanExportResult:
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self) -> None:
+        return None
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        return True
 
 
 def evict_stale_langfuse_resources(*, public_key: str | None, secret_key: str | None, base_url: str | None) -> None:

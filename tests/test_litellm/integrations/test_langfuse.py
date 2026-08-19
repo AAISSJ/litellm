@@ -1148,6 +1148,64 @@ async def test_async_log_failure_event_works_without_standard_logging_object():
             assert "InternalServerError" in call_kwargs["status_message"]
 
 
+def test_mock_mode_makes_no_network_calls(monkeypatch):
+    """LANGFUSE_MOCK promises full execution without egress.
+
+    The mock intercepts httpx, but v4 ships observations over its own OTLP
+    exporter, so nothing stops a real request to the configured host without an
+    exporter that drops them.
+    """
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from langfuse._client.resource_manager import LangfuseResourceManager
+
+    received = []
+
+    class _Receiver(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append(self.path)
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Receiver)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("LANGFUSE_MOCK", "true")
+    monkeypatch.setenv("LANGFUSE_HOST", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-mock-egress")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-mock-egress")
+    LangfuseResourceManager._instances.pop("pk-mock-egress", None)
+
+    try:
+        logger = LangFuseLogger()
+        assert logger.is_mock_mode is True
+        now = datetime.datetime.now()
+        logger.log_event_on_langfuse(
+            kwargs={
+                "call_type": "completion",
+                "litellm_params": {"metadata": {}, "proxy_server_request": {"headers": {}}},
+                "messages": [{"role": "user", "content": "hi"}],
+                "optional_params": {},
+            },
+            response_obj=litellm.ModelResponse(choices=[{"message": {"role": "assistant", "content": "yo"}}]),
+            start_time=now,
+            end_time=now,
+        )
+        logger.Langfuse.flush()
+        time.sleep(1)
+    finally:
+        server.shutdown()
+        LangfuseResourceManager._instances.pop("pk-mock-egress", None)
+
+    assert received == [], f"mock mode sent real requests: {received}"
+
+
 def test_max_langfuse_clients_limit():
     """
     Test that the max langfuse clients limit is respected when initializing multiple clients
