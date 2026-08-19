@@ -244,24 +244,11 @@ class LangFuseLogger:
                 verbose_logger.debug("Langfuse project id unavailable, alerting links will omit it")
 
         if os.getenv("UPSTREAM_LANGFUSE_SECRET_KEY") is not None:
-            upstream_langfuse_debug_env: Final = os.getenv("UPSTREAM_LANGFUSE_DEBUG")
-            upstream_langfuse_debug: Final = (
-                str_to_bool(upstream_langfuse_debug_env) if upstream_langfuse_debug_env is not None else None
-            )
             self.upstream_langfuse_secret_key = os.getenv("UPSTREAM_LANGFUSE_SECRET_KEY")
             self.upstream_langfuse_public_key = os.getenv("UPSTREAM_LANGFUSE_PUBLIC_KEY")
             self.upstream_langfuse_host = os.getenv("UPSTREAM_LANGFUSE_HOST")
             self.upstream_langfuse_release = os.getenv("UPSTREAM_LANGFUSE_RELEASE")
-            self.upstream_langfuse_debug = upstream_langfuse_debug_env
-            self.upstream_langfuse = Langfuse(
-                public_key=self.upstream_langfuse_public_key,
-                secret_key=self.upstream_langfuse_secret_key,
-                host=self.upstream_langfuse_host,
-                release=self.upstream_langfuse_release,
-                debug=(upstream_langfuse_debug if upstream_langfuse_debug is not None else False),
-            )
-        else:
-            self.upstream_langfuse = None
+            self.upstream_langfuse_debug = os.getenv("UPSTREAM_LANGFUSE_DEBUG")
 
     def safe_init_langfuse_client(self, parameters: dict) -> Langfuse:
         """
