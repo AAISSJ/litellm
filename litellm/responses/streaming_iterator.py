@@ -207,10 +207,11 @@ class BaseResponsesAPIStreamingIterator:
             "api_base": _api_base,
             "custom_llm_provider": custom_llm_provider,
         }
-        self._hidden_params["additional_headers"] = process_response_headers(
-            self.response.headers or {}
-        )  # GUARANTEE OPENAI HEADERS IN RESPONSE
-        self._hidden_params["headers"] = dict(self.response.headers or {})  # mutable-ok: raw headers for logging
+        _raw_headers: Final = dict(self.response.headers or {})  # mutable-ok: process_response_headers takes a dict
+        _processed_headers: Final = process_response_headers(_raw_headers)
+        self._hidden_params["additional_headers"] = _processed_headers  # GUARANTEE OPENAI HEADERS IN RESPONSE
+        self._raw_headers: Final[Mapping[str, str]] = MappingProxyType(_raw_headers)
+        self._processed_headers: Final[Mapping[str, object]] = MappingProxyType(_processed_headers)
 
     def _check_max_streaming_duration(self) -> None:
         """Raise litellm.Timeout if the stream has exceeded LITELLM_MAX_STREAMING_DURATION_SECONDS."""
@@ -425,7 +426,10 @@ class BaseResponsesAPIStreamingIterator:
         copied: Final = self._copy_for_logging(completed)
         inner_response: Final = getattr(copied, "response", None)
         if isinstance(inner_response, ResponsesAPIResponse):
-            inner_response._hidden_params = dict(self._hidden_params)  # mutable-ok: model_dump drops private attrs
+            inner_response.store_provider_response_headers(
+                processed_headers=self._processed_headers,
+                raw_headers=self._raw_headers,
+            )
         return copied
 
     @staticmethod

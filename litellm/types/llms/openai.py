@@ -1337,6 +1337,16 @@ class ResponsesAPIResponse(BaseLiteLLMOpenAIResponseObject):
     # Define private attributes using PrivateAttr
     _hidden_params: dict = PrivateAttr(default_factory=dict)
 
+    def store_provider_response_headers(
+        self, *, processed_headers: Mapping[str, object], raw_headers: Mapping[str, str]
+    ) -> None:
+        """Keep provider headers on a response rebuilt from `model_dump()`, which drops private attrs."""
+        self._hidden_params = {  # mutable-ok: the private attr is typed as dict
+            **self._hidden_params,
+            "additional_headers": dict(processed_headers),  # mutable-ok: logging callbacks expect a plain dict
+            "headers": dict(raw_headers),  # mutable-ok: logging callbacks expect a plain dict
+        }
+
     @field_validator("reasoning", mode="before")
     @classmethod
     def validate_reasoning_to_dict(cls, value: Any) -> dict[str, Any] | None:
