@@ -18,7 +18,11 @@ from litellm.litellm_core_utils import thread_pool_executor as thread_pool_execu
 from litellm.responses import streaming_iterator as responses_streaming_iterator_module
 from litellm.litellm_core_utils.litellm_logging import Logging as LitellmLogging
 from litellm.responses.streaming_iterator import ResponsesAPIStreamingIterator
-from litellm.types.llms.openai import ResponsesAPIResponse
+from litellm.types.llms.openai import (
+    ResponseCompletedEvent,
+    ResponsesAPIResponse,
+    ResponsesAPIStreamEvents,
+)
 
 
 class RecordingCustomLogger(CustomLogger):
@@ -93,14 +97,8 @@ def _make_logging_obj() -> LitellmLogging:
     return logging_obj
 
 
-def _make_iterator(logging_obj: LitellmLogging) -> ResponsesAPIStreamingIterator:
-    iterator = ResponsesAPIStreamingIterator(
-        response=httpx.Response(200),
-        model="gpt-5.4-nano",
-        responses_api_provider_config=None,
-        logging_obj=logging_obj,
-    )
-    iterator.completed_response = ResponsesAPIResponse(
+def _make_completed_response() -> ResponsesAPIResponse:
+    return ResponsesAPIResponse(
         id="resp_lit4210",
         created_at=1700000000.0,
         model="gpt-5.4-nano",
@@ -116,6 +114,16 @@ def _make_iterator(logging_obj: LitellmLogging) -> ResponsesAPIStreamingIterator
         temperature=1.0,
         top_p=1.0,
     )
+
+
+def _make_iterator(logging_obj: LitellmLogging) -> ResponsesAPIStreamingIterator:
+    iterator = ResponsesAPIStreamingIterator(
+        response=httpx.Response(200),
+        model="gpt-5.4-nano",
+        responses_api_provider_config=None,
+        logging_obj=logging_obj,
+    )
+    iterator.completed_response = _make_completed_response()
     return iterator
 
 
@@ -156,3 +164,46 @@ async def test_sync_callbacks_run_only_after_async_handler_completes(recording_e
     submit_times = recording_executor.submit_times_for(logging_obj)
     assert len(submit_times) == 1
     assert submit_times[0] >= recorder.async_hook_finished
+
+
+class HeaderCapturingLogger(CustomLogger):
+    def __init__(self):
+        super().__init__()
+        self.hidden_params: dict | None = None
+        self.standard_logging_payload: dict | None = None
+
+    async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
+        self.hidden_params = getattr(response_obj, "_hidden_params", None)
+        self.standard_logging_payload = kwargs.get("standard_logging_object")
+
+
+@pytest.mark.asyncio
+async def test_provider_response_headers_reach_success_callbacks(monkeypatch, recording_executor):
+    """Regression test for #38090: provider headers (e.g. Azure apim-request-id) must survive
+    the completed-response copy made for logging"""
+    recorder = HeaderCapturingLogger()
+    monkeypatch.setattr(litellm, "success_callback", [recorder])
+    monkeypatch.setattr(litellm, "_async_success_callback", [recorder])
+
+    logging_obj = _make_logging_obj()
+    iterator = ResponsesAPIStreamingIterator(
+        response=httpx.Response(200, headers={"apim-request-id": "req-38090", "x-ms-region": "East US 2"}),
+        model="gpt-5.4-nano",
+        responses_api_provider_config=None,
+        logging_obj=logging_obj,
+    )
+    iterator.completed_response = ResponseCompletedEvent(
+        type=ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+        response=_make_completed_response(),
+    )
+
+    iterator._log_completed_response(is_async=True)
+    await asyncio.sleep(0.5)
+
+    assert recorder.hidden_params is not None
+    assert recorder.hidden_params["additional_headers"]["llm_provider-apim-request-id"] == "req-38090"
+    assert recorder.hidden_params["headers"]["apim-request-id"] == "req-38090"
+    assert recorder.standard_logging_payload is not None
+    logged_headers = recorder.standard_logging_payload["hidden_params"]["additional_headers"]
+    assert logged_headers["llm_provider-apim-request-id"] == "req-38090"
+    assert logged_headers["llm_provider-x-ms-region"] == "East US 2"

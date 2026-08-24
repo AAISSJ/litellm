@@ -210,6 +210,7 @@ class BaseResponsesAPIStreamingIterator:
         self._hidden_params["additional_headers"] = process_response_headers(
             self.response.headers or {}
         )  # GUARANTEE OPENAI HEADERS IN RESPONSE
+        self._hidden_params["headers"] = dict(self.response.headers or {})  # mutable-ok: raw headers for logging
 
     def _check_max_streaming_duration(self) -> None:
         """Raise litellm.Timeout if the stream has exceeded LITELLM_MAX_STREAMING_DURATION_SECONDS."""
@@ -387,18 +388,7 @@ class BaseResponsesAPIStreamingIterator:
         if self._persist_completed_response_before_logging:
             self._persist_completed_response_to_cache(is_async=is_async)
 
-        # Create a copy for logging to avoid modifying the response object that will be returned to the user
-        # The logging handlers may transform usage from Responses API format (input_tokens/output_tokens)
-        # to chat completion format (prompt_tokens/completion_tokens) for internal logging
-        # Use model_dump + model_validate instead of deepcopy to avoid pickle errors with
-        # Pydantic ValidatorIterator when response contains tool_choice with allowed_tools (fixes #17192)
-        logging_response = self.completed_response
-        if self.completed_response is not None and hasattr(self.completed_response, "model_dump"):
-            try:
-                logging_response = type(self.completed_response).model_validate(self.completed_response.model_dump())
-            except Exception:
-                # Fallback to original if serialization fails
-                pass
+        logging_response: Final = self._build_logging_response()
 
         end_time: Final = datetime.now()
         if is_async:
@@ -427,6 +417,27 @@ class BaseResponsesAPIStreamingIterator:
                 end_time=end_time,
             )
         self._run_post_success_hooks(end_time=end_time)
+
+    def _build_logging_response(self) -> ResponsesAPIStreamingResponse | None:
+        completed: Final = self.completed_response
+        if completed is None:
+            return None
+        copied: Final = self._copy_for_logging(completed)
+        inner_response: Final = getattr(copied, "response", None)
+        if isinstance(inner_response, ResponsesAPIResponse):
+            inner_response._hidden_params = dict(self._hidden_params)  # mutable-ok: model_dump drops private attrs
+        return copied
+
+    @staticmethod
+    def _copy_for_logging(completed: ResponsesAPIStreamingResponse) -> ResponsesAPIStreamingResponse:
+        """
+        model_dump + model_validate, instead of deepcopy, avoids pickle errors with Pydantic
+        ValidatorIterator on tool_choice.allowed_tools (fixes #17192)
+        """
+        try:
+            return type(completed).model_validate(completed.model_dump())
+        except Exception:
+            return completed
 
     def _handle_logging_completed_response(self):
         """Base implementation - should be overridden by subclasses"""
