@@ -18,11 +18,11 @@ vi.mock("./PromptTable", () => ({
     onDeleteClick,
   }: {
     isLoading: boolean;
-    onDeleteClick: (id: string, name: string) => void;
+    onDeleteClick: (id: string, name: string, environment?: string) => void;
   }) => (
     <div data-testid="prompt-table">
       {isLoading ? "table-loading" : "table-loaded"}
-      <button type="button" onClick={() => onDeleteClick("prompt-1", "my-prompt")}>
+      <button type="button" onClick={() => onDeleteClick("prompt-1", "my-prompt", "staging")}>
         row-delete
       </button>
     </div>
@@ -162,7 +162,7 @@ describe("PromptsPanel delete confirmation", () => {
 
     await user.click(screen.getByRole("button", { name: /^delete$/i }));
 
-    await waitFor(() => expect(mockDeletePromptCall).toHaveBeenCalledWith("sk-test", "prompt-1"));
+    await waitFor(() => expect(mockDeletePromptCall).toHaveBeenCalledWith("sk-test", "prompt-1", "staging"));
   });
 
   it("should abandon the delete when the confirmation is dismissed", async () => {
@@ -191,7 +191,7 @@ describe("PromptsPanel delete confirmation", () => {
     await user.click(await screen.findByRole("button", { name: "row-delete" }));
     await screen.findByText(/delete prompt: my-prompt/i);
     await user.click(screen.getByRole("button", { name: /^delete$/i }));
-    await waitFor(() => expect(mockDeletePromptCall).toHaveBeenCalledWith("sk-test", "prompt-1"));
+    await waitFor(() => expect(mockDeletePromptCall).toHaveBeenCalledWith("sk-test", "prompt-1", "staging"));
 
     await user.keyboard("{Escape}");
     expect(screen.getByText(/delete prompt: my-prompt/i)).toBeInTheDocument();

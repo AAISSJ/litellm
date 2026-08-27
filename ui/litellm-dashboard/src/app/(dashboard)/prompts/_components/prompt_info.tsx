@@ -20,6 +20,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 
 export interface PromptInfoProps {
   promptId: string;
+  environment?: string;
   onClose: () => void;
   accessToken: string | null;
   isAdmin: boolean;
@@ -27,7 +28,15 @@ export interface PromptInfoProps {
   onEdit?: (promptData: any) => void;
 }
 
-const PromptInfoView: React.FC<PromptInfoProps> = ({ promptId, onClose, accessToken, isAdmin, onDelete, onEdit }) => {
+const PromptInfoView: React.FC<PromptInfoProps> = ({
+  promptId,
+  environment,
+  onClose,
+  accessToken,
+  isAdmin,
+  onDelete,
+  onEdit,
+}) => {
   const [promptData, setPromptData] = useState<PromptSpec | null>(null);
   const [promptTemplate, setPromptTemplate] = useState<PromptTemplateBase | null>(null);
   const [rawApiResponse, setRawApiResponse] = useState<any>(null);
@@ -86,11 +95,11 @@ const PromptInfoView: React.FC<PromptInfoProps> = ({ promptId, onClose, accessTo
   const isInitialMount = useRef(true);
 
   useEffect(() => {
-    setSelectedEnv(null);
+    setSelectedEnv(environment ?? null);
     setEnvironments([]);
     setVersionHistory([]);
-    fetchPromptInfo();
-  }, [promptId, accessToken]);
+    fetchPromptInfo(environment);
+  }, [promptId, accessToken, environment]);
 
   // When environment changes (user clicks tab), re-fetch — skip initial mount
   useEffect(() => {
@@ -140,7 +149,7 @@ const PromptInfoView: React.FC<PromptInfoProps> = ({ promptId, onClose, accessTo
     if (!accessToken || !promptData) return;
     setIsDeleting(true);
     try {
-      await deletePromptCall(accessToken, basePromptId);
+      await deletePromptCall(accessToken, basePromptId, selectedEnv ?? undefined);
       toast.success(`Prompt "${basePromptId}" deleted successfully`);
       onDelete?.();
       onClose();
