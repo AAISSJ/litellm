@@ -53,7 +53,6 @@ _TRUSTED_EXCHANGE_HOSTS_ENV: Final = "LITELLM_ANTHROPIC_WIF_ALLOWED_HOSTS"
 _DEFAULT_TRUSTED_EXCHANGE_HOST: Final = "api.anthropic.com"
 _REJECTED_REF_PREFIX: Final = "oidc/env_path/"
 _IDENTITY_SOURCE_PARAM: Final = "anthropic_identity_source"
-_IDENTITY_SOURCE_ENV: Final = "ANTHROPIC_IDENTITY_SOURCE"
 
 # litellm_params key -> InternalIssuerSource/KeycloakSource field name. Every key here must
 # also be listed in ANTHROPIC_WIF_KWARGS_KEYS (get_litellm_params.py), which is what makes it
@@ -136,8 +135,10 @@ def _resolve_identity_source(
     frozen config, hashes it into the ``oidc/<kind>/<hash>`` cache-key ref (``identity_source_ref``),
     and closes the source's fetch/mint function over it. An unset-but-invalid config (unknown
     kind, a missing required field, or a field from the other variant) fails closed here rather
-    than silently falling back to token_file."""
-    source_kind: Final = _config_value(litellm_params, _IDENTITY_SOURCE_PARAM, _IDENTITY_SOURCE_ENV)
+    than silently falling back to token_file. Read from litellm_params only, never the environment:
+    a process-wide default would force every deployment that left the field unset onto that source,
+    breaking token-file deployments that share the process."""
+    source_kind: Final = _param_str(litellm_params, _IDENTITY_SOURCE_PARAM)
     if source_kind is None:
         legacy_ref: Final = _resolve_assertion_ref(litellm_params)
         return (legacy_ref, None) if legacy_ref is not None else None
