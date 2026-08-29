@@ -154,6 +154,9 @@ model_list:
         
         # Fallback model if tier cannot be determined
         default_model: gpt-4o
+
+        # Route image requests only to vision-capable tier models (default: false)
+        modality_routing: true
 ```
 
 ## Usage
@@ -177,6 +180,27 @@ response = litellm.completion(
 ```
 
 ## Special Behaviors
+
+### Modality-based capability routing
+
+The classifier reads text alone, so a request carrying an image can classify cheap and land on a
+text-only model, which rejects it with a provider 400 no fallback catches. `modality_routing: true`
+makes tier resolution capability-aware for image requests: the decided tier is kept when its pool
+has a model that accepts image input, otherwise the request is served by the nearest capable tier
+(walking up the ladder first, then down), then by `default_model` when no tier qualifies, and
+rejected with a clear 400 naming the router when nothing can serve it.
+
+A model is excluded only when it is explicitly declared `supports_vision: false`, by a
+deployment-level `model_info` override first and the model cost map otherwise, so unmapped custom
+names stay routable. A group holding several deployments must accept on every one of them: the
+router picks the deployment inside the group after this gate runs, so a mixed group is treated
+text-only and escalated past rather than gambling the image on its text-only member. When the gate changes the placement, the routing decision records
+`cause: modality_escalation` with the displaced tier in `signals` as
+`modality_escalated_from:<TIER>`; a same-tier pick that merely skipped text-only pool members keeps
+its original cause and carries `modality:image` in `signals`. Two deliberate bounds: a
+session-affinity pin still wins even when an image arrives mid-session, and the escalation itself
+is never pinned, so the next text turn classifies normally. The plan-mode floor is honored, meaning
+the gate never routes below it and rejects instead.
 
 ### Heuristic-first chaining
 

@@ -479,7 +479,7 @@ class TestModelSelection:
                 "default_model": "mid",
             },
         )
-        pool = ["cheap", "premium"]
+        pool = ("cheap", "premium")
         with patch(
             "litellm.router_strategy.complexity_router.complexity_router.random.choice",
             return_value="premium",
@@ -3023,7 +3023,7 @@ class TestAdaptiveSoftFloors:
                 "default_model": "mid",
             },
         )
-        pool = ["cheap", "premium"]
+        pool = ("cheap", "premium")
         with patch(
             "litellm.router_strategy.complexity_router.complexity_router.random.choice",
             return_value="premium",
@@ -9762,3 +9762,550 @@ class TestHeuristicFirst:
         )
         outcome = await router.aclassify(NO_SIGNAL_PROMPT)
         assert outcome.cause == "default_model_fallback"
+
+
+class TestModalityRouting:
+    """modality_routing: image-bearing requests only route to models that accept image input."""
+
+    IMAGE_MESSAGE = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What color is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}},
+            ],
+        }
+    ]
+    ANTHROPIC_IMAGE_MESSAGE = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What color is this?"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}},
+            ],
+        }
+    ]
+    TEXT_MESSAGE = [{"role": "user", "content": "What color is the sky?"}]
+
+    @staticmethod
+    def _router(mock_router_instance, config, vision_by_model):
+        """vision_by_model: pool entry -> True/False (deployment model_info) or None (undeclared)."""
+
+        def get_model_list(model_name=None):
+            if model_name not in vision_by_model:
+                return []
+            declared = vision_by_model[model_name]
+            return [
+                {
+                    "model_name": model_name,
+                    "litellm_params": {"model": f"openai/unmapped-{model_name}"},
+                    "model_info": {
+                        "adaptive_router_preferences": {"quality_tier": 2},
+                        **({} if declared is None else {"supports_vision": declared}),
+                    },
+                }
+            ]
+
+        mock_router_instance.get_model_list = get_model_list
+        return ComplexityRouter(
+            model_name="modality-test-router",
+            litellm_router_instance=mock_router_instance,
+            complexity_router_config=config,
+        )
+
+    @pytest.mark.asyncio
+    async def test_flag_off_image_routes_to_classified_tier(self, mock_router_instance, basic_config):
+        router = self._router(
+            mock_router_instance, basic_config, {"gpt-4o-mini": False, "claude-sonnet-4-20250514": True}
+        )
+        result = await router.async_pre_routing_hook(
+            model="test-model", request_kwargs={}, messages=self.IMAGE_MESSAGE
+        )
+        assert result.model == "gpt-4o-mini"
+        assert result.routing_decision["cause"] == "heuristic_scorer"
+
+    @pytest.mark.asyncio
+    async def test_image_request_escalates_past_text_only_tiers(self, mock_router_instance, basic_config):
+        router = self._router(
+            mock_router_instance,
+            {**basic_config, "modality_routing": True},
+            {
+                "gpt-4o-mini": False,
+                "gpt-4o": False,
+                "claude-sonnet-4-20250514": True,
+                "o1-preview": False,
+            },
+        )
+        result = await router.async_pre_routing_hook(
+            model="test-model", request_kwargs={}, messages=self.IMAGE_MESSAGE
+        )
+        assert result.model == "claude-sonnet-4-20250514"
+        assert result.routing_decision["cause"] == "modality_escalation"
+        assert "modality:image" in result.routing_decision["signals"]
+        assert "modality_escalated_from:SIMPLE" in result.routing_decision["signals"]
+        assert result.routing_decision["tier"] == "COMPLEX"
+
+    @pytest.mark.asyncio
+    async def test_text_request_unchanged_with_flag_on(self, mock_router_instance, basic_config):
+        router = self._router(
+            mock_router_instance,
+            {**basic_config, "modality_routing": True},
+            {"gpt-4o-mini": False},
+        )
+        result = await router.async_pre_routing_hook(
+            model="test-model", request_kwargs={}, messages=self.TEXT_MESSAGE
+        )
+        assert result.model == "gpt-4o-mini"
+        assert result.routing_decision["cause"] == "heuristic_scorer"
+        assert "modality:image" not in (result.routing_decision.get("signals") or ())
+
+    @pytest.mark.asyncio
+    async def test_mixed_pool_keeps_tier_and_picks_vision_member(self, mock_router_instance):
+        config = {
+            "tiers": {"SIMPLE": ["text-cheap", "vision-cheap"], "COMPLEX": "vision-big"},
+            "modality_routing": True,
+        }
+        router = self._router(
+            mock_router_instance, config, {"text-cheap": False, "vision-cheap": True, "vision-big": True}
+        )
+        result = await router.async_pre_routing_hook(
+            model="test-model", request_kwargs={}, messages=self.IMAGE_MESSAGE
+        )
+        assert result.model == "vision-cheap"
+        assert result.routing_decision["cause"] == "heuristic_scorer"
+        assert result.routing_decision["tier"] == "SIMPLE"
+        assert "modality:image" in result.routing_decision["signals"]
+
+    @pytest.mark.asyncio
+    async def test_no_capable_tier_falls_back_to_vision_default_model(self, mock_router_instance):
+        config = {
+            "tiers": {"SIMPLE": "text-cheap", "COMPLEX": "text-big"},
+            "default_model": "vision-default",
+            "modality_routing": True,
+        }
+        router = self._router(
+            mock_router_instance, config, {"text-cheap": False, "text-big": False, "vision-default": True}
+        )
+        result = await router.async_pre_routing_hook(
+            model="test-model", request_kwargs={}, messages=self.IMAGE_MESSAGE
+        )
+        assert result.model == "vision-default"
+        assert result.routing_decision["cause"] == "modality_escalation"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("default_model", [None, "text-default"])
+    async def test_no_capable_model_raises_bad_request(self, mock_router_instance, default_model):
+        config = {
+            "tiers": {"SIMPLE": "text-cheap", "COMPLEX": "text-big"},
+            "modality_routing": True,
+            **({"default_model": default_model} if default_model else {}),
+        }
+        router = self._router(
+            mock_router_instance, config, {"text-cheap": False, "text-big": False, "text-default": False}
+        )
+        with pytest.raises(litellm.BadRequestError, match="no model"):
+            await router.async_pre_routing_hook(
+                model="test-model", request_kwargs={}, messages=self.IMAGE_MESSAGE
+            )
+
+    @pytest.mark.asyncio
+    async def test_undeclared_models_stay_eligible(self, mock_router_instance, basic_config):
+        """Only an explicit supports_vision false excludes: unmapped custom names keep routing."""
+        router = self._router(
+            mock_router_instance,
+            {**basic_config, "modality_routing": True},
+            {"gpt-4o-mini": None},
+        )
+        result = await router.async_pre_routing_hook(
+            model="test-model", request_kwargs={}, messages=self.IMAGE_MESSAGE
+        )
+        assert result.model == "gpt-4o-mini"
+        assert result.routing_decision["cause"] == "heuristic_scorer"
+
+    @pytest.mark.asyncio
+    async def test_anthropic_image_block_detected_on_messages_surface(self, mock_router_instance, basic_config):
+        """/v1/messages reaches the hook in untranslated Anthropic dialect (type 'image')."""
+        router = self._router(
+            mock_router_instance,
+            {**basic_config, "modality_routing": True},
+            {"gpt-4o-mini": False, "gpt-4o": True},
+        )
+        result = await router.async_pre_routing_hook(
+            model="test-model", request_kwargs={}, messages=self.ANTHROPIC_IMAGE_MESSAGE
+        )
+        assert result.model == "gpt-4o"
+        assert result.routing_decision["cause"] == "modality_escalation"
+
+    @pytest.mark.asyncio
+    async def test_tool_result_screenshot_escalates_on_messages_surface(self, mock_router_instance, basic_config):
+        """An agent's screenshot arrives nested inside an Anthropic tool_result block; the
+        detector must see it and route the turn to a vision-capable tier."""
+        router = self._router(
+            mock_router_instance,
+            {**basic_config, "modality_routing": True},
+            {"gpt-4o-mini": False, "gpt-4o": True},
+        )
+        message = [
+            {"role": "user", "content": "take a screenshot and describe it"},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_1",
+                        "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}}
+                        ],
+                    }
+                ],
+            },
+        ]
+        result = await router.async_pre_routing_hook(model="test-model", request_kwargs={}, messages=message)
+        assert result.model == "gpt-4o"
+        assert result.routing_decision["cause"] == "modality_escalation"
+
+    @pytest.mark.asyncio
+    async def test_image_only_prompt_gates_the_no_ask_fallback(self, mock_router_instance):
+        """A prompt that is only an image has no extractable ask; the default_model-first
+        fallback must still honor the gate."""
+        config = {
+            "tiers": {"MEDIUM": "vision-mid"},
+            "default_model": "text-default",
+            "modality_routing": True,
+        }
+        router = self._router(mock_router_instance, config, {"vision-mid": True, "text-default": False})
+        image_only = [
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}}]}
+        ]
+        result = await router.async_pre_routing_hook(model="test-model", request_kwargs={}, messages=image_only)
+        assert result.model == "vision-mid"
+        assert result.routing_decision["cause"] == "modality_escalation"
+        assert "modality_displaced_default_model" in result.routing_decision["signals"]
+
+    @pytest.mark.asyncio
+    async def test_keyword_override_tier_is_gated(self, mock_router_instance):
+        config = {
+            "tiers": {"SIMPLE": "text-cheap", "COMPLEX": "vision-big"},
+            "keyword_tier_rules": [{"keywords": ["quick lookup"], "tier": "SIMPLE"}],
+            "modality_routing": True,
+        }
+        router = self._router(mock_router_instance, config, {"text-cheap": False, "vision-big": True})
+        message = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "quick lookup: what is in this picture?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}},
+                ],
+            }
+        ]
+        result = await router.async_pre_routing_hook(model="test-model", request_kwargs={}, messages=message)
+        assert result.model == "vision-big"
+        assert result.routing_decision["cause"] == "modality_escalation"
+        assert "modality_escalated_from:SIMPLE" in result.routing_decision["signals"]
+
+    @pytest.mark.asyncio
+    async def test_custom_tier_set_escalates_by_definition_order(self, mock_router_instance):
+        config = {
+            "classifier_type": "llm",
+            "classifier_llm_config": {"model": "gpt-4o-mini"},
+            "fallback_tier": "cheap",
+            "tier_definitions": [
+                {"name": "cheap", "description": "trivial asks"},
+                {"name": "premium", "description": "hard asks"},
+            ],
+            "tiers": {"cheap": "cheap-model", "premium": "premium-model"},
+            "keyword_tier_rules": [{"keywords": ["quick lookup"], "tier": "cheap"}],
+            "modality_routing": True,
+        }
+        router = self._router(mock_router_instance, config, {"cheap-model": False, "premium-model": True})
+        message = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "quick lookup: what is in this picture?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}},
+                ],
+            }
+        ]
+        result = await router.async_pre_routing_hook(model="test-model", request_kwargs={}, messages=message)
+        assert result.model == "premium-model"
+        assert result.routing_decision["cause"] == "modality_escalation"
+
+    @pytest.mark.asyncio
+    async def test_session_pin_bypasses_the_gate(self, mock_router_instance, basic_config):
+        """A pinned session keeps its model even when an image arrives; the pin wins by design."""
+        cache = AsyncMock()
+        cache.async_get_cache = AsyncMock(return_value={"model": "gpt-4o-mini", "tier": "SIMPLE"})
+        mock_router_instance.cache = cache
+        router = self._router(
+            mock_router_instance,
+            {**basic_config, "modality_routing": True, "session_affinity": True},
+            {"gpt-4o-mini": False},
+        )
+        result = await router.async_pre_routing_hook(
+            model="test-model",
+            request_kwargs={"metadata": {"session_id": "session-1"}},
+            messages=self.IMAGE_MESSAGE,
+        )
+        assert result.model == "gpt-4o-mini"
+        assert result.routing_decision["cause"] == "session_affinity_pin"
+
+    def test_modality_escalation_is_not_pinnable(self):
+        from litellm.router_strategy.complexity_router.complexity_router import _decision_is_pinnable
+
+        assert _decision_is_pinnable({"cause": "modality_escalation"}) is False
+        assert _decision_is_pinnable({"cause": "heuristic_scorer"}) is True
+
+    def test_gate_never_walks_below_the_plan_mode_floor(self, mock_router_instance):
+        config = {
+            "tiers": {"SIMPLE": "vision-cheap", "MEDIUM": "text-mid", "COMPLEX": "text-big"},
+            "default_model": "vision-default",
+            "modality_routing": True,
+        }
+        router = self._router(
+            mock_router_instance,
+            config,
+            {"vision-cheap": True, "text-mid": False, "text-big": False, "vision-default": True},
+        )
+        eligible = router._modality_eligible_models()
+        assert eligible == frozenset({"vision-cheap", "vision-default"})
+        with pytest.raises(litellm.BadRequestError):
+            router._modality_gated_tier(ComplexityTier.MEDIUM, eligible, floor=ComplexityTier.MEDIUM)
+        floored_free = router._modality_gated_tier(ComplexityTier.MEDIUM, eligible)
+        assert floored_free == (ComplexityTier.SIMPLE, True)
+
+    @pytest.mark.asyncio
+    async def test_mixed_deployment_group_is_treated_text_only(self, mock_router_instance, basic_config):
+        """A group holding vision and text-only deployments must escalate: deployment selection
+        inside the group happens after the gate, so a mixed group could hand the image to its
+        text-only member."""
+
+        def get_model_list(model_name=None):
+            if model_name == "gpt-4o-mini":
+                return [
+                    {
+                        "model_name": model_name,
+                        "litellm_params": {"model": "openai/unmapped-a"},
+                        "model_info": {"supports_vision": True},
+                    },
+                    {
+                        "model_name": model_name,
+                        "litellm_params": {"model": "openai/unmapped-b"},
+                        "model_info": {"supports_vision": False},
+                    },
+                ]
+            if model_name == "gpt-4o":
+                return [
+                    {
+                        "model_name": model_name,
+                        "litellm_params": {"model": "openai/unmapped-c"},
+                        "model_info": {"supports_vision": True},
+                    }
+                ]
+            return []
+
+        mock_router_instance.get_model_list = get_model_list
+        router = ComplexityRouter(
+            model_name="modality-test-router",
+            litellm_router_instance=mock_router_instance,
+            complexity_router_config={**basic_config, "modality_routing": True},
+        )
+        result = await router.async_pre_routing_hook(
+            model="test-model", request_kwargs={}, messages=self.IMAGE_MESSAGE
+        )
+        assert result.model == "gpt-4o"
+        assert result.routing_decision["cause"] == "modality_escalation"
+
+    @pytest.mark.asyncio
+    async def test_escalated_pin_replacement_pick_is_gated(self, mock_router_instance):
+        """An escalation keyword on a pinned session picks a NEW model; that pick must honor
+        the gate even though the kept pin would not."""
+        cache = AsyncMock()
+        cache.async_get_cache = AsyncMock(return_value={"model": "vision-cheap", "tier": "SIMPLE"})
+        mock_router_instance.cache = cache
+        config = {
+            "tiers": {"SIMPLE": "vision-cheap", "MEDIUM": "text-mid", "COMPLEX": "vision-big"},
+            "session_affinity": True,
+            "modality_routing": True,
+        }
+        router = self._router(
+            mock_router_instance, config, {"vision-cheap": True, "text-mid": False, "vision-big": True}
+        )
+        message = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "LITELLM ESCALATE what is in this image?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}},
+                ],
+            }
+        ]
+        result = await router.async_pre_routing_hook(
+            model="test-model", request_kwargs={"metadata": {"session_id": "s1"}}, messages=message
+        )
+        assert result.model == "vision-big"
+        assert result.routing_decision["cause"] == "session_affinity_escalation"
+        assert "modality:image" in (result.routing_decision.get("signals") or ())
+
+    @pytest.mark.asyncio
+    async def test_pinned_plan_floor_pick_is_gated(self, mock_router_instance):
+        """The plan-mode floor replaces a pinned model with a floor-tier pick; that pick must
+        honor the gate and walk up past a text-only floor tier."""
+        cache = AsyncMock()
+        cache.async_get_cache = AsyncMock(return_value={"model": "vision-cheap", "tier": "SIMPLE"})
+        mock_router_instance.cache = cache
+        config = {
+            "tiers": {"SIMPLE": "vision-cheap", "MEDIUM": "text-mid", "COMPLEX": "vision-big"},
+            "session_affinity": True,
+            "plan_mode_min_tier": "MEDIUM",
+            "modality_routing": True,
+        }
+        router = self._router(
+            mock_router_instance, config, {"vision-cheap": True, "text-mid": False, "vision-big": True}
+        )
+        plan_body = {
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "what is in this image?"}]},
+                {"role": "system", "content": [{"type": "text", "text": "Plan mode is active. Do not execute."}]},
+            ]
+        }
+        result = await router.async_pre_routing_hook(
+            model="test-model",
+            request_kwargs={"metadata": {"session_id": "s1"}, "proxy_server_request": {"body": plan_body}},
+            messages=self.IMAGE_MESSAGE,
+        )
+        assert result.model == "vision-big"
+        assert result.routing_decision["cause"] == "plan_mode"
+        assert "modality:image" in (result.routing_decision.get("signals") or ())
+
+    @pytest.mark.asyncio
+    async def test_image_only_plan_mode_turn_never_walks_below_the_floor(self, mock_router_instance):
+        """An image-only turn takes the no-ask path before plan detection; its gate walk must
+        still stop at the floor instead of landing below it."""
+        config = {
+            "tiers": {"SIMPLE": "vision-cheap", "MEDIUM": "text-mid"},
+            "plan_mode_min_tier": "MEDIUM",
+            "modality_routing": True,
+        }
+        router = self._router(mock_router_instance, config, {"vision-cheap": True, "text-mid": False})
+        plan_body = {
+            "messages": [
+                {"role": "system", "content": [{"type": "text", "text": "Plan mode is active. Do not execute."}]},
+            ]
+        }
+        image_only = [
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}}]}
+        ]
+        with pytest.raises(litellm.BadRequestError):
+            await router.async_pre_routing_hook(
+                model="test-model",
+                request_kwargs={"proxy_server_request": {"body": plan_body}},
+                messages=image_only,
+            )
+
+    @pytest.mark.asyncio
+    async def test_image_only_plan_mode_turn_prefers_floor_tier_over_default_model(self, mock_router_instance):
+        """A vision-capable default_model below the floor must not serve a gated plan-mode turn;
+        the floor tier's capable model wins, mirroring the gate's last-resort default arm."""
+        config = {
+            "tiers": {"SIMPLE": "vision-cheap", "MEDIUM": "vision-mid"},
+            "default_model": "vision-default",
+            "plan_mode_min_tier": "MEDIUM",
+            "modality_routing": True,
+        }
+        router = self._router(
+            mock_router_instance, config, {"vision-cheap": True, "vision-mid": True, "vision-default": True}
+        )
+        plan_body = {
+            "messages": [
+                {"role": "system", "content": [{"type": "text", "text": "Plan mode is active. Do not execute."}]},
+            ]
+        }
+        image_only = [
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}}]}
+        ]
+        result = await router.async_pre_routing_hook(
+            model="test-model",
+            request_kwargs={"proxy_server_request": {"body": plan_body}},
+            messages=image_only,
+        )
+        assert result.model == "vision-mid"
+        assert result.routing_decision["cause"] == "modality_escalation"
+        assert "modality_displaced_default_model" in result.routing_decision["signals"]
+
+    def test_gate_walk_starts_at_a_floor_above_the_decided_tier(self, mock_router_instance):
+        """A floor above the decided tier moves the walk's start up to it: a vision-capable
+        tier under the floor must never win, and nothing at or above it means rejection."""
+        config = {
+            "tiers": {"SIMPLE": "text-a", "MEDIUM": "vision-mid", "COMPLEX": "vision-big"},
+            "modality_routing": True,
+        }
+        router = self._router(
+            mock_router_instance, config, {"text-a": False, "vision-mid": True, "vision-big": True}
+        )
+        eligible = router._modality_eligible_models()
+        assert router._modality_gated_tier(ComplexityTier.MEDIUM, eligible, floor=ComplexityTier.COMPLEX) == (
+            ComplexityTier.COMPLEX,
+            True,
+        )
+        only_below = self._router(
+            mock_router_instance,
+            {"tiers": {"MEDIUM": "vision-mid", "COMPLEX": "text-big"}, "modality_routing": True},
+            {"vision-mid": True, "text-big": False},
+        )
+        below_only_eligible = only_below._modality_eligible_models()
+        with pytest.raises(litellm.BadRequestError):
+            only_below._modality_gated_tier(
+                ComplexityTier.MEDIUM, below_only_eligible, floor=ComplexityTier.COMPLEX
+            )
+
+    @pytest.mark.asyncio
+    async def test_custom_tier_no_ask_turn_reports_honestly(self, mock_router_instance):
+        """A custom tier set has no MEDIUM; an image-only no-ask turn whose cheapest tier is
+        already vision-capable must keep cause default_fallback, and one whose cheapest tier is
+        text-only must name that tier as displaced, never MEDIUM."""
+        base = {
+            "classifier_type": "llm",
+            "classifier_llm_config": {"model": "gpt-4o-mini"},
+            "fallback_tier": "cheap",
+            "tier_definitions": [
+                {"name": "cheap", "description": "trivial asks"},
+                {"name": "premium", "description": "hard asks"},
+            ],
+            "tiers": {"cheap": "cheap-model", "premium": "premium-model"},
+            "modality_routing": True,
+        }
+        image_only = [
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}}]}
+        ]
+        capable_cheap = self._router(
+            mock_router_instance, base, {"cheap-model": True, "premium-model": True}
+        )
+        kept = await capable_cheap.async_pre_routing_hook(model="m", request_kwargs={}, messages=image_only)
+        assert kept.model == "cheap-model"
+        assert kept.routing_decision["cause"] == "default_fallback"
+        text_cheap = self._router(
+            mock_router_instance, base, {"cheap-model": False, "premium-model": True}
+        )
+        moved = await text_cheap.async_pre_routing_hook(model="m", request_kwargs={}, messages=image_only)
+        assert moved.model == "premium-model"
+        assert moved.routing_decision["cause"] == "modality_escalation"
+        assert "modality_escalated_from:cheap" in moved.routing_decision["signals"]
+
+    @pytest.mark.asyncio
+    async def test_adaptive_pick_respects_the_constraint(self, mock_router_instance):
+        config = {
+            "tiers": {"SIMPLE": ["text-cheap", "vision-cheap"], "COMPLEX": "vision-big"},
+            "adaptive": True,
+            "modality_routing": True,
+        }
+        mock_router_instance.model_list = []
+        mock_router_instance.model_name_to_deployment_indices = {}
+        router = self._router(
+            mock_router_instance, config, {"text-cheap": False, "vision-cheap": True, "vision-big": True}
+        )
+        result = await router.async_pre_routing_hook(
+            model="test-model", request_kwargs={}, messages=self.IMAGE_MESSAGE
+        )
+        assert result.model in {"vision-cheap", "vision-big"}
