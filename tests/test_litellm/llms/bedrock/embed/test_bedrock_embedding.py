@@ -947,6 +947,7 @@ def test_titan_image_embedding_cost_uses_per_image_rate():
         ("float", ["float"]),
         ("base64", ["float"]),
         (["float", "int8"], ["float", "int8"]),
+        (["float", "base64"], ["float"]),
     ],
 )
 def test_bedrock_cohere_embedding_types_wrapped_as_list(

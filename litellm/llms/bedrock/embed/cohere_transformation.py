@@ -6,7 +6,10 @@ Why separate file? Make it easy to see how transformation works
 
 from typing import Final
 
-from litellm.llms.cohere.embed.transformation import CohereEmbeddingConfig
+from litellm.llms.cohere.embed.transformation import (
+    CohereEmbeddingConfig,
+    normalize_embedding_types,
+)
 from litellm.types.llms.bedrock import CohereEmbeddingRequest
 
 
@@ -20,9 +23,7 @@ class BedrockCohereEmbeddingConfig:
     def map_openai_params(self, non_default_params: dict, optional_params: dict) -> dict:
         for k, v in non_default_params.items():
             if k == "encoding_format":
-                optional_params["embedding_types"] = [
-                    "float" if fmt == "base64" else fmt for fmt in (tuple(v) if isinstance(v, list) else (v,))
-                ]
+                optional_params["embedding_types"] = normalize_embedding_types(v)
             elif k == "dimensions":
                 optional_params["output_dimension"] = v
         return optional_params

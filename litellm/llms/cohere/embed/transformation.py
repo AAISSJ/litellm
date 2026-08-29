@@ -30,6 +30,11 @@ from litellm.utils import is_base64_encoded
 from ..common_utils import CohereError
 
 
+def normalize_embedding_types(encoding_format: str | list[str]) -> list[str]:
+    formats: Final = encoding_format if isinstance(encoding_format, list) else [encoding_format]
+    return list(dict.fromkeys("float" if fmt == "base64" else fmt for fmt in formats))
+
+
 class CohereEmbeddingConfig(BaseEmbeddingConfig):
     """
     Reference: https://docs.cohere.com/v2/reference/embed
@@ -50,10 +55,7 @@ class CohereEmbeddingConfig(BaseEmbeddingConfig):
     ) -> dict:
         for k, v in non_default_params.items():
             if k == "encoding_format":
-                if isinstance(v, list):
-                    optional_params["embedding_types"] = v
-                else:
-                    optional_params["embedding_types"] = [v]
+                optional_params["embedding_types"] = normalize_embedding_types(v)
             elif k == "dimensions":
                 optional_params["output_dimension"] = v
         return optional_params

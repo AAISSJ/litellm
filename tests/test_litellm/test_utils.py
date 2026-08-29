@@ -4479,6 +4479,27 @@ class TestBedrockCohereEmbeddingDispatch:
         assert optional_params.get("output_dimension") == 512
 
 
+class TestCohereEmbeddingEncodingFormatDispatch:
+    """Direct Cohere provider must normalize the OpenAI SDK's default
+    encoding_format="base64" into embedding_types=["float"], since Cohere's
+    embedding_types enum has no "base64". LIT-6480, twin of #38670."""
+
+    @pytest.mark.parametrize(
+        "encoding_format,expected_embedding_types",
+        [
+            ("float", ["float"]),
+            ("base64", ["float"]),
+        ],
+    )
+    def test_cohere_embed_normalizes_encoding_format(self, encoding_format, expected_embedding_types):
+        optional_params = litellm.utils.get_optional_params_embeddings(
+            model="embed-english-v3.0",
+            encoding_format=encoding_format,
+            custom_llm_provider="cohere",
+        )
+        assert optional_params.get("embedding_types") == expected_embedding_types
+
+
 @pytest.mark.parametrize(
     "model",
     [

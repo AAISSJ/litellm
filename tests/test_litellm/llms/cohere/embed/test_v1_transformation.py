@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 
 from litellm.llms.cohere.embed.v1_transformation import CohereEmbeddingConfig
 from litellm.types.utils import EmbeddingResponse
@@ -208,3 +210,18 @@ class TestCohereEmbeddingV1Transform:
 
         # Verify encoding was called
         self.encoding.encode.assert_called()
+
+    @pytest.mark.parametrize(
+        "encoding_format,expected_embedding_types",
+        [
+            ("float", ["float"]),
+            ("base64", ["float"]),
+            (["base64", "int8"], ["float", "int8"]),
+        ],
+    )
+    def test_map_openai_params_normalizes_encoding_format(self, encoding_format, expected_embedding_types):
+        optional_params = self.config.map_openai_params(
+            non_default_params={"encoding_format": encoding_format},
+            optional_params={},
+        )
+        assert optional_params["embedding_types"] == expected_embedding_types

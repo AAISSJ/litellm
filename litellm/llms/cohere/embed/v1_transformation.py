@@ -8,6 +8,7 @@ import httpx
 
 from litellm import COHERE_DEFAULT_EMBEDDING_INPUT_TYPE
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
+from litellm.llms.cohere.embed.transformation import normalize_embedding_types
 from litellm.types.llms.bedrock import (
     CohereEmbeddingRequest,
     CohereEmbeddingRequestWithModel,
@@ -30,7 +31,7 @@ class CohereEmbeddingConfig:
     def map_openai_params(self, non_default_params: dict, optional_params: dict) -> dict:
         for k, v in non_default_params.items():
             if k == "encoding_format":
-                optional_params["embedding_types"] = v
+                optional_params["embedding_types"] = normalize_embedding_types(v)
         return optional_params
 
     def _is_v3_model(self, model: str) -> bool:
