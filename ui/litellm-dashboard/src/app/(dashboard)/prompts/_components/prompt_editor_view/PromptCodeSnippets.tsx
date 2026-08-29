@@ -22,6 +22,7 @@ interface PromptCodeSnippetsProps {
   promptVariables?: Record<string, string>;
   accessToken: string | null;
   version?: string;
+  promptEnvironment?: string | null;
   proxySettings?: {
     PROXY_BASE_URL?: string;
     LITELLM_UI_API_DOC_BASE_URL?: string | null;
@@ -34,6 +35,7 @@ const PromptCodeSnippets: React.FC<PromptCodeSnippetsProps> = ({
   promptVariables = {},
   accessToken,
   version = "1",
+  promptEnvironment,
   proxySettings,
 }) => {
   const syntaxTheme = useSyntaxTheme(coy);
@@ -64,6 +66,9 @@ const PromptCodeSnippets: React.FC<PromptCodeSnippetsProps> = ({
   // Generate code based on selected language and tab
   const generateCode = () => {
     const hasVariables = Object.keys(promptVariables).length > 0;
+    const envCurlSuffix = promptEnvironment ? `,\n    "prompt_environment": "${promptEnvironment}"` : "";
+    const envPySuffix = promptEnvironment ? `,\n        "prompt_environment": "${promptEnvironment}"` : "";
+    const envJsSuffix = promptEnvironment ? `,\n        prompt_environment: "${promptEnvironment}"` : "";
 
     if (selectedLanguage === "curl") {
       if (selectedTab === "basic") {
@@ -72,7 +77,7 @@ const PromptCodeSnippets: React.FC<PromptCodeSnippetsProps> = ({
   -H 'Authorization: Bearer ${effectiveApiKey}' \\
   -d '{
     "model": "${model}",
-    "prompt_id": "${promptId}"${
+    "prompt_id": "${promptId}"${envCurlSuffix}${
       hasVariables
         ? `,
     "prompt_variables": ${JSON.stringify(promptVariables, null, 6).replace(/\n/g, "\n    ")}`
@@ -85,7 +90,7 @@ const PromptCodeSnippets: React.FC<PromptCodeSnippetsProps> = ({
   -H 'Authorization: Bearer ${effectiveApiKey}' \\
   -d '{
     "model": "${model}",
-    "prompt_id": "${promptId}"${
+    "prompt_id": "${promptId}"${envCurlSuffix}${
       hasVariables
         ? `,
     "prompt_variables": ${JSON.stringify(promptVariables, null, 6).replace(/\n/g, "\n    ")}`
@@ -104,7 +109,7 @@ const PromptCodeSnippets: React.FC<PromptCodeSnippetsProps> = ({
   -H 'Authorization: Bearer ${effectiveApiKey}' \\
   -d '{
     "model": "${model}",
-    "prompt_id": "${promptId}",
+    "prompt_id": "${promptId}"${envCurlSuffix},
     "prompt_version": ${version},
     "messages": [
       {
@@ -127,7 +132,7 @@ client = openai.OpenAI(
 response = client.chat.completions.create(
     model="${model}",
     extra_body={
-        "prompt_id": "${promptId}"${
+        "prompt_id": "${promptId}"${envPySuffix}${
           hasVariables
             ? `,
         "prompt_variables": ${JSON.stringify(promptVariables, null, 8).replace(/\n/g, "\n        ")}`
@@ -145,7 +150,7 @@ response = client.chat.completions.create(
         {"role": "user", "content": "hi"}
     ],
     extra_body={
-        "prompt_id": "${promptId}"${
+        "prompt_id": "${promptId}"${envPySuffix}${
           hasVariables
             ? `,
         "prompt_variables": ${JSON.stringify(promptVariables, null, 8).replace(/\n/g, "\n        ")}`
@@ -163,7 +168,7 @@ response = client.chat.completions.create(
         {"role": "user", "content": "Who are u"}
     ],
     extra_body={
-        "prompt_id": "${promptId}",
+        "prompt_id": "${promptId}"${envPySuffix},
         "prompt_version": ${version}
     }
 )
@@ -184,11 +189,11 @@ const client = new OpenAI({
 async function main() {
     const response = await client.chat.completions.create({
         model: "${model}",
-        ${
+        prompt_id: "${promptId}"${envJsSuffix}${
           hasVariables
-            ? `prompt_id: "${promptId}",
+            ? `,
         prompt_variables: ${JSON.stringify(promptVariables, null, 8).replace(/\n/g, "\n        ")}`
-            : `prompt_id: "${promptId}"`
+            : ""
         }
     });
     
@@ -204,11 +209,11 @@ async function main() {
         messages: [
             { role: "user", content: "hi" }
         ],
-        ${
+        prompt_id: "${promptId}"${envJsSuffix}${
           hasVariables
-            ? `prompt_id: "${promptId}",
+            ? `,
         prompt_variables: ${JSON.stringify(promptVariables, null, 8).replace(/\n/g, "\n        ")}`
-            : `prompt_id: "${promptId}"`
+            : ""
         }
     });
     
@@ -224,7 +229,7 @@ async function main() {
         messages: [
             { role: "user", content: "Who are u" }
         ],
-        prompt_id: "${promptId}",
+        prompt_id: "${promptId}"${envJsSuffix},
         prompt_version: ${version}
     });
     
@@ -241,7 +246,7 @@ main();`;
     if (isModalVisible) {
       setGeneratedCode(generateCode());
     }
-  }, [isModalVisible, selectedLanguage, selectedTab, promptId, model, promptVariables]);
+  }, [isModalVisible, selectedLanguage, selectedTab, promptId, model, promptVariables, promptEnvironment]);
 
   return (
     <>
