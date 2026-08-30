@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 [features]
 default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
+panic-test = []
 
 [dependencies]
 litellm-core = { workspace = true, features = ["bedrock-auth"] }
