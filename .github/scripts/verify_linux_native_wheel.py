@@ -30,7 +30,7 @@ def main() -> int:
         native_path.parent.mkdir(parents=True, exist_ok=True)
         native_path.write_bytes(archive.read(native_member))
 
-    report: Final = "\n".join(
+    size_report: Final = "\n".join(
         (
             "## Release wheel size",
             "",
@@ -44,9 +44,9 @@ def main() -> int:
     )
     summary_path: Final = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path is None:
-        sys.stdout.write(report)
+        sys.stdout.write(size_report)
     else:
-        Path(summary_path).write_text(report)
+        Path(summary_path).write_text(size_report)
 
     sections: Final = subprocess.run(
         ("readelf", "--sections", "--wide", native_path),
@@ -72,6 +72,22 @@ def main() -> int:
     if "PyInit__native" not in dynamic_symbols:
         sys.stderr.write("native extension does not export PyInit__native\n")
         return 1
+
+    verified_report: Final = size_report + "\n".join(
+        (
+            "",
+            "| Validation | Result |",
+            "| --- | --- |",
+            "| ELF symbols | stripped |",
+            "| Python initializer | exported |",
+            "",
+        )
+    )
+    report_path: Final = os.environ.get("RELEASE_WHEEL_REPORT")
+    if report_path is not None:
+        Path(report_path).write_text(verified_report)
+    if summary_path is not None:
+        Path(summary_path).write_text(verified_report)
 
     return 0
 
