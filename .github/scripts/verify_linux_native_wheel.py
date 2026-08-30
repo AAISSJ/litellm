@@ -30,15 +30,18 @@ def main() -> int:
         native_path.parent.mkdir(parents=True, exist_ok=True)
         native_path.write_bytes(archive.read(native_member))
 
+    commit_sha: Final = os.environ.get("GITHUB_SHA", "unknown")
     size_report: Final = "\n".join(
         (
-            "## Release wheel size",
+            "## Native wheel build report",
             "",
-            "| Artifact | Bytes |",
+            f"Built commit: `{commit_sha}`",
+            "",
+            "| Artifact | Size |",
             "| --- | ---: |",
-            f"| Compressed wheel | {wheel.stat().st_size:,} |",
-            f"| Uncompressed wheel | {uncompressed_wheel_size:,} |",
-            f"| Native extension | {native_member.file_size:,} |",
+            f"| Compressed wheel | {wheel.stat().st_size / 1_000_000:.2f} MB |",
+            f"| Uncompressed wheel | {uncompressed_wheel_size / 1_000_000:.2f} MB |",
+            f"| Native extension | {native_member.file_size / 1_000_000:.2f} MB |",
             "",
         )
     )
