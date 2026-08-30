@@ -17,10 +17,13 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use serde_json::{Map, Value};
+use tracing::instrument::WithSubscriber;
 
+mod function_trace;
 mod gil;
 mod marshal;
 
+use function_trace::FunctionTrace;
 use marshal::{from_py, to_py};
 
 pyo3::create_exception!(
@@ -208,6 +211,21 @@ fn marshal_inputs(
     Ok((document, extra_headers, optional_params, timeout))
 }
 
+fn ocr_response_to_py(
+    py: Python<'_>,
+    response: Value,
+    trace: Option<FunctionTrace>,
+) -> PyResult<Py<PyAny>> {
+    let output = match trace {
+        Some(trace) => serde_json::json!({
+            "response": response,
+            "trace": trace.events(),
+        }),
+        None => response,
+    };
+    to_py(py, &output)
+}
+
 #[pyfunction]
 #[pyo3(signature = (model, custom_llm_provider=None, optional_params=None))]
 fn ocr_decline(
@@ -232,7 +250,7 @@ fn ocr_decline(
 }
 
 #[pyfunction]
-#[pyo3(signature = (model, document, api_key=None, api_base=None, custom_llm_provider=None, extra_headers=None, optional_params=None, timeout_seconds=None))]
+#[pyo3(signature = (model, document, api_key=None, api_base=None, custom_llm_provider=None, extra_headers=None, optional_params=None, timeout_seconds=None, trace=false))]
 #[allow(clippy::too_many_arguments)]
 fn ocr(
     py: Python<'_>,
@@ -244,6 +262,7 @@ fn ocr(
     extra_headers: Option<Py<PyAny>>,
     optional_params: Option<Py<PyAny>>,
     timeout_seconds: Option<f64>,
+    trace: bool,
 ) -> PyResult<Py<PyAny>> {
     let (document, extra_headers, optional_params, timeout) = marshal_inputs(
         py,
@@ -253,8 +272,10 @@ fn ocr(
         timeout_seconds,
     )?;
 
+    let trace_recorder = trace.then(FunctionTrace::default);
+    let trace_dispatch = trace_recorder.as_ref().map(FunctionTrace::dispatcher);
     let result = gil::release_gil(py, || {
-        pyo3_async_runtimes::tokio::get_runtime().block_on(run_ocr(OcrRequest {
+        let future = run_ocr(OcrRequest {
             model: &model,
             document,
             api_key: api_key.as_deref(),
@@ -264,11 +285,17 @@ fn ocr(
             optional_params,
             timeout,
             litellm_call_id: None,
-        }))
+        });
+        match trace_dispatch {
+            Some(dispatch) => {
+                pyo3_async_runtimes::tokio::get_runtime().block_on(future.with_subscriber(dispatch))
+            }
+            None => pyo3_async_runtimes::tokio::get_runtime().block_on(future),
+        }
     });
 
     match result {
-        Ok(value) => to_py(py, &value),
+        Ok(value) => ocr_response_to_py(py, value, trace_recorder),
         Err(err) => Err(core_error_to_pyerr(err)),
     }
 }

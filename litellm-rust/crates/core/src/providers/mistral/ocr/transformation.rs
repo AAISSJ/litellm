@@ -24,10 +24,12 @@ pub struct MistralOcrConfig;
 pub const MISTRAL_OCR_CONFIG: MistralOcrConfig = MistralOcrConfig;
 
 impl OcrProviderTransformation for MistralOcrConfig {
+    #[tracing::instrument(target = "litellm::function_trace", level = "trace", skip_all)]
     fn get_supported_ocr_params(&self) -> &'static [&'static str] {
         SUPPORTED_OCR_PARAMS
     }
 
+    #[tracing::instrument(target = "litellm::function_trace", level = "trace", skip_all)]
     fn transform_ocr_request(
         &self,
         model: &str,
@@ -54,6 +56,7 @@ impl OcrProviderTransformation for MistralOcrConfig {
         })
     }
 
+    #[tracing::instrument(target = "litellm::function_trace", level = "trace", skip_all)]
     fn transform_ocr_response_data(
         &self,
         model: &str,

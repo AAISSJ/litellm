@@ -7,6 +7,7 @@ use super::types::{OcrRequestData, OcrResponseData};
 pub trait OcrProviderTransformation: Sync {
     fn get_supported_ocr_params(&self) -> &'static [&'static str];
 
+    #[tracing::instrument(target = "litellm::function_trace", level = "trace", skip_all)]
     fn map_ocr_params(&self, non_default_params: &Map<String, Value>) -> Map<String, Value> {
         let mut mapped_params = Map::new();
         for (param, value) in non_default_params {
