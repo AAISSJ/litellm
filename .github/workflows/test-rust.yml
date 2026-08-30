@@ -125,6 +125,7 @@ jobs:
 
       - name: Verify stripped native extension
         env:
+          RELEASE_WHEEL_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RELEASE_WHEEL_REPORT: dist/release-wheel-report.md
         run: python .github/scripts/verify_linux_native_wheel.py dist/*.whl
 

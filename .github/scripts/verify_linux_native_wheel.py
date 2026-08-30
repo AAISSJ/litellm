@@ -60,7 +60,7 @@ def main() -> int:
     python_tag: Final = wheel_tags[1]
     abi_tag: Final = wheel_tags[2]
     platform_tag: Final = wheel_tags[3]
-    commit_sha: Final = os.environ.get("GITHUB_SHA", "unknown")
+    commit_sha: Final = os.environ.get("RELEASE_WHEEL_COMMIT_SHA", os.environ.get("GITHUB_SHA", "unknown"))
     rustc_version: Final = subprocess.run(
         ("rustc", "--version"),
         check=True,
