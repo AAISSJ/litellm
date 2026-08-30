@@ -10,6 +10,19 @@ from pathlib import Path, PurePosixPath
 from typing import Final
 
 
+def _loads_native_module(native_path: Path) -> bool:
+    module_spec: Final = importlib.util.spec_from_file_location("litellm.rust_bridge._native", native_path)
+    if module_spec is None or module_spec.loader is None:
+        return False
+    try:
+        native_module: Final = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(native_module)
+    except Exception as error:
+        sys.stderr.write(f"native module load failed: {error}\n")
+        return False
+    return True
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         sys.stderr.write(f"usage: {Path(sys.argv[0]).name} WHEEL\n")
@@ -33,10 +46,6 @@ def main() -> int:
             if member.filename.endswith((".pdb", ".dwp", ".rlib", ".rmeta", "Cargo.toml", "Cargo.lock"))
             or any(part.endswith(".dSYM") for part in PurePosixPath(member.filename).parts)
         )
-        if unexpected_members:
-            sys.stderr.write(f"wheel contains unexpected build artifacts: {', '.join(unexpected_members)}\n")
-            return 1
-
         native_member: Final = native_members[0]
         uncompressed_wheel_size: Final = sum(member.file_size for member in wheel_members)
         native_path: Final = wheel.parent / "native" / Path(native_member.filename).name
@@ -101,14 +110,8 @@ def main() -> int:
         text=True,
     ).stdout
     debug_sections: Final = tuple(section for section in (".debug_", ".zdebug_") if section in sections)
-    if debug_sections:
-        sys.stderr.write(
-            f"{native_member.filename} contains debug sections: {', '.join(debug_sections)}\n"
-        )
-        return 1
-    if ".symtab" in sections:
-        sys.stderr.write(f"{native_member.filename} contains a static symbol table\n")
-        return 1
+    debug_sections_absent: Final = not debug_sections
+    static_symbol_table_absent: Final = ".symtab" not in sections
 
     dynamic_symbols: Final = subprocess.run(
         ("readelf", "--dyn-syms", "--wide", native_path),
@@ -116,29 +119,20 @@ def main() -> int:
         capture_output=True,
         text=True,
     ).stdout
-    if "PyInit__native" not in dynamic_symbols:
-        sys.stderr.write("native extension does not export PyInit__native\n")
-        return 1
-
-    module_spec: Final = importlib.util.spec_from_file_location("litellm.rust_bridge._native", native_path)
-    if module_spec is None or module_spec.loader is None:
-        sys.stderr.write("cannot create an import specification for the native extension\n")
-        return 1
-    native_module: Final = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(native_module)
+    extension_entry_point_present: Final = "PyInit__native" in dynamic_symbols
+    native_module_loads: Final = _loads_native_module(native_path)
+    validations: Final = (
+        ("Debug sections are absent", debug_sections_absent),
+        ("Static symbol table is absent", static_symbol_table_absent),
+        ("Python extension entry point is present", extension_entry_point_present),
+        ("Native module loads", native_module_loads),
+        ("Wheel contents are valid", not unexpected_members),
+    )
 
     verified_report: Final = size_report + "\n".join(
-        (
-            "",
-            "| Validation | Result |",
-            "| --- | --- |",
-            "| Debug sections | absent |",
-            "| Static symbol table | absent |",
-            "| Python extension entry point | present |",
-            "| Native module load | passed |",
-            "| Wheel contents | passed |",
-            "",
-        )
+        ("", "| Validation | Expected | Result |", "| --- | --- | :---: |")
+        + tuple(f"| {label} | Yes | {'O' if passed else 'X'} |" for label, passed in validations)
+        + ("",)
     )
     report_path: Final = os.environ.get("RELEASE_WHEEL_REPORT")
     if report_path is not None:
@@ -146,7 +140,16 @@ def main() -> int:
     if summary_path is not None:
         Path(summary_path).write_text(verified_report)
 
-    return 0
+    if debug_sections:
+        sys.stderr.write(f"{native_member.filename} contains debug sections: {', '.join(debug_sections)}\n")
+    if not static_symbol_table_absent:
+        sys.stderr.write(f"{native_member.filename} contains a static symbol table\n")
+    if not extension_entry_point_present:
+        sys.stderr.write("native extension does not export PyInit__native\n")
+    if unexpected_members:
+        sys.stderr.write(f"wheel contains unexpected build artifacts: {', '.join(unexpected_members)}\n")
+
+    return 0 if all(passed for _, passed in validations) else 1
 
 
 if __name__ == "__main__":
