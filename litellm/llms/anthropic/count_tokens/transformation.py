@@ -53,12 +53,13 @@ class AnthropicCountTokensConfig:
 
         return request
 
-    def get_required_headers(self, api_key: str) -> dict[str, str]:
+    def get_required_headers(self, api_key: str | None, auth_token: str | None = None) -> dict[str, str]:
         """
         Get the required headers for the CountTokens API.
 
         Args:
-            api_key: The Anthropic API key
+            api_key: The Anthropic API key (sent as x-api-key, or Bearer for sk-ant-oat tokens)
+            auth_token: Optional ANTHROPIC_AUTH_TOKEN, sent as Authorization: Bearer
 
         Returns:
             Dictionary of required headers
@@ -67,12 +68,14 @@ class AnthropicCountTokensConfig:
             optionally_handle_anthropic_oauth,
         )
 
-        headers: dict[str, str] = {
+        base_headers: Final[dict[str, str]] = {
             "Content-Type": "application/json",
-            "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
             "anthropic-beta": ANTHROPIC_TOKEN_COUNTING_BETA_VERSION,
         }
+        if auth_token and not api_key:
+            return {**base_headers, "authorization": f"Bearer {auth_token}"}
+        headers: dict[str, str] = {**base_headers, "x-api-key": api_key or ""}
         headers, _ = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key)
         return headers
 

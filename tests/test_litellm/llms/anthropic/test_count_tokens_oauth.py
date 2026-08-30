@@ -130,3 +130,101 @@ class TestCountTokensUsesWorkloadIdentity:
         assert result is not None
         assert result.total_tokens == 42
         assert seen["api_key"] == minted
+
+
+class TestCountTokensHonorsAuthTokenBeforeWif:
+    """Chat's credential walk resolves ANTHROPIC_AUTH_TOKEN between the api key and WIF, so a proxy
+    with federation env vars must still send the operator's auth token rather than minting."""
+
+    @pytest.mark.asyncio
+    async def test_auth_token_wins_over_federation_env(self, monkeypatch):
+        from litellm.llms.anthropic.count_tokens import token_counter as token_counter_module
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "at-operator-token")
+
+        async def fail_if_called(_params, _api_base, _model):
+            raise AssertionError("WIF must not run when ANTHROPIC_AUTH_TOKEN is set")
+
+        monkeypatch.setattr(token_counter_module, "aget_anthropic_wif_token", fail_if_called, raising=False)
+        monkeypatch.setattr("litellm.llms.anthropic.wif.aget_anthropic_wif_token", fail_if_called, raising=False)
+
+        seen: dict[str, object] = {}
+
+        async def fake_request(**kwargs):
+            seen.update(kwargs)
+            return {"input_tokens": 7}
+
+        monkeypatch.setattr(
+            token_counter_module.anthropic_count_tokens_handler,
+            "handle_count_tokens_request",
+            fake_request,
+            raising=False,
+        )
+
+        result = await token_counter_module.AnthropicTokenCounter().count_tokens(
+            model_to_use="claude-sonnet-4-5",
+            messages=[{"role": "user", "content": "hi"}],
+            contents=None,
+            deployment={
+                "litellm_params": {
+                    "model": "anthropic/claude-sonnet-4-5",
+                    "anthropic_federation_rule_id": "fdrl_x",
+                    "anthropic_organization_id": "org-x",
+                }
+            },
+            request_model="claude-sonnet-4-5",
+        )
+
+        assert result is not None
+        assert result.total_tokens == 7
+        assert seen["auth_token"] == "at-operator-token"
+        assert seen["api_key"] is None
+
+    def test_auth_token_produces_bearer_header(self):
+        config = AnthropicCountTokensConfig()
+        headers = config.get_required_headers(api_key=None, auth_token="at-operator-token")
+
+        assert headers.get("authorization") == "Bearer at-operator-token"
+        assert "x-api-key" not in headers
+
+
+class TestCountTokensWifFailureDoesNotEscape:
+    """A WIF exchange failure raises litellm.AuthenticationError. If that escapes count_tokens,
+    the proxy surfaces a 500 instead of falling back to the local tokenizer."""
+
+    @pytest.mark.asyncio
+    async def test_wif_authentication_error_is_captured(self, monkeypatch):
+        import litellm
+        from litellm.llms.anthropic.count_tokens import token_counter as token_counter_module
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+        async def fail_exchange(_params, _api_base, _model):
+            raise litellm.AuthenticationError(
+                message="federation exchange rejected",
+                llm_provider="anthropic",
+                model="claude-sonnet-4-5",
+            )
+
+        monkeypatch.setattr(token_counter_module, "aget_anthropic_wif_token", fail_exchange, raising=False)
+        monkeypatch.setattr("litellm.llms.anthropic.wif.aget_anthropic_wif_token", fail_exchange, raising=False)
+
+        result = await token_counter_module.AnthropicTokenCounter().count_tokens(
+            model_to_use="claude-sonnet-4-5",
+            messages=[{"role": "user", "content": "hi"}],
+            contents=None,
+            deployment={
+                "litellm_params": {
+                    "model": "anthropic/claude-sonnet-4-5",
+                    "anthropic_federation_rule_id": "fdrl_x",
+                    "anthropic_organization_id": "org-x",
+                }
+            },
+            request_model="claude-sonnet-4-5",
+        )
+
+        assert result is not None
+        assert result.error is True
+        assert "federation exchange rejected" in (result.error_message or "")

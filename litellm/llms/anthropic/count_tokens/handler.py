@@ -28,7 +28,8 @@ class AnthropicCountTokensHandler(AnthropicCountTokensConfig):
         self,
         model: str,
         messages: list[dict[str, Any]],
-        api_key: str,
+        api_key: str | None = None,
+        auth_token: str | None = None,
         api_base: str | None = None,
         timeout: float | httpx.Timeout | None = None,
         tools: list[dict[str, Any]] | None = None,
@@ -72,7 +73,7 @@ class AnthropicCountTokensHandler(AnthropicCountTokensConfig):
             verbose_logger.debug("Making request to: %s", endpoint_url)
 
             # Get required headers
-            headers: Final = self.get_required_headers(api_key)
+            headers: Final = self.get_required_headers(api_key, auth_token=auth_token)
 
             # Use LiteLLM's async httpx client
             async_client: Final = get_async_httpx_client(llm_provider=litellm.LlmProviders.ANTHROPIC)
