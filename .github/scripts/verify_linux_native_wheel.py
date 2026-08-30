@@ -121,11 +121,14 @@ def main() -> int:
     ).stdout
     extension_entry_point_present: Final = "PyInit__native" in dynamic_symbols
     native_module_loads: Final = _loads_native_module(native_path)
+    native_size_limit: Final = 20_000_000
+    native_size_within_limit: Final = native_member.file_size <= native_size_limit
     validations: Final = (
         ("Debug sections are absent", debug_sections_absent),
         ("Static symbol table is absent", static_symbol_table_absent),
         ("Python extension entry point is present", extension_entry_point_present),
         ("Native module loads", native_module_loads),
+        ("Native extension does not exceed 20 MB", native_size_within_limit),
         ("Wheel contents are valid", not unexpected_members),
     )
 
@@ -146,6 +149,8 @@ def main() -> int:
         sys.stderr.write(f"{native_member.filename} contains a static symbol table\n")
     if not extension_entry_point_present:
         sys.stderr.write("native extension does not export PyInit__native\n")
+    if not native_size_within_limit:
+        sys.stderr.write(f"native extension exceeds 20 MB: {native_member.file_size / 1_000_000:.2f} MB\n")
     if unexpected_members:
         sys.stderr.write(f"wheel contains unexpected build artifacts: {', '.join(unexpected_members)}\n")
 
