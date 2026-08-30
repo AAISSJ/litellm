@@ -508,6 +508,79 @@ class TestAnthropicFilesHandler:
         assert sync_calls == []
         assert thread_ids and thread_ids[0] != threading.get_ident()
 
+    @pytest.mark.asyncio
+    async def test_afile_content_forwards_litellm_params_to_wif_resolver(
+        self, handler, mock_anthropic_batch_results_succeeded, monkeypatch
+    ):
+        """Regression: batch_utils forwards ANTHROPIC_WIF_KWARGS_KEYS into the
+        credentials so a federated deployment (no static api_key) can bill the
+        batch-result fetch. The handler previously dropped those keys because it
+        did not thread litellm_params into aget_auth_header, so
+        resolve_anthropic_wif_params fell back to process env vars only and a
+        deployment-only federation raised 'Missing Anthropic API Key'."""
+        from litellm.llms.anthropic.common_utils import AnthropicModelInfo
+
+        for name in (
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_BASE",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_FEDERATION_RULE_ID",
+            "ANTHROPIC_ORGANIZATION_ID",
+            "ANTHROPIC_SERVICE_ACCOUNT_ID",
+            "ANTHROPIC_IDENTITY_TOKEN",
+            "ANTHROPIC_IDENTITY_TOKEN_FILE",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        deployment_params = {
+            "anthropic_federation_rule_id": "fdrl_deployment",
+            "anthropic_organization_id": "org-deployment",
+            "anthropic_identity_token": "deployment-inline-jwt",
+        }
+        seen_params = []
+
+        async def fake_aget_auth_header(
+            api_key=None, api_base=None, *, use_bearer_for_custom_base=False, litellm_params=None,
+            allow_workload_identity=False,
+        ):
+            seen_params.append(litellm_params)
+            return {"authorization": "Bearer sk-ant-oat01-deployment-minted"}
+
+        monkeypatch.setattr(AnthropicModelInfo, "aget_auth_header", staticmethod(fake_aget_auth_header))
+
+        mock_response = httpx.Response(
+            status_code=200,
+            content=mock_anthropic_batch_results_succeeded,
+            headers={"content-type": "application/json"},
+            request=httpx.Request(
+                method="GET",
+                url="https://api.anthropic.com/v1/messages/batches/batch_123/results",
+            ),
+        )
+
+        with patch(  # test-quality-ok: the proxy wiring under test is what this patches
+            "litellm.llms.anthropic.files.handler.get_async_httpx_client"
+        ) as mock_get_client:  # test-quality-ok: the proxy wiring under test is what this patches
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_get_client.return_value = mock_client
+
+            await handler.afile_content(
+                file_content_request={
+                    "file_id": "batch_123",
+                    "extra_headers": None,
+                    "extra_body": None,
+                },
+                api_key=None,
+                litellm_params=deployment_params,
+            )
+
+        assert seen_params == [deployment_params], (
+            "afile_content must thread litellm_params through so a deployment-scoped WIF "
+            "identity source reaches aget_auth_header instead of being silently dropped"
+        )
+
 
 class TestAnthropicBatchesConfig:
     """Test Anthropic Batches Config for batch retrieval transformation"""

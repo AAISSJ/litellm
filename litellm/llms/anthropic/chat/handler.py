@@ -4,7 +4,7 @@ Calling + translation logic for anthropic's `/v1/messages` endpoint
 
 import copy
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Final, Literal, Union, cast
 
 import httpx
@@ -337,17 +337,35 @@ class AnthropicChatCompletion(BaseLLM):
         headers={},
         client=None,
     ):
-        from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
-        from litellm.utils import ProviderConfigManager
-
         optional_params = copy.deepcopy(optional_params)
         stream: Final = optional_params.pop("stream", None)
         json_mode: Final[bool] = optional_params.pop("json_mode", False)
         is_vertex_request: Final[bool] = optional_params.pop("is_vertex_request", False)
         optional_params.pop("vertex_count_tokens_location", None)
-        _is_function_call: Final = False
         messages = copy.deepcopy(messages)
-        headers = AnthropicConfig().validate_environment(
+        if acompletion is True:
+            return self._acompletion_dispatch(
+                model=model,
+                messages=messages,
+                api_base=api_base,
+                custom_llm_provider=custom_llm_provider,
+                custom_prompt_dict=custom_prompt_dict,
+                model_response=model_response,
+                print_verbose=print_verbose,
+                encoding=encoding,
+                api_key=api_key,
+                logging_obj=logging_obj,
+                optional_params=optional_params,
+                timeout=timeout,
+                litellm_params=litellm_params,
+                logger_fn=logger_fn,
+                headers=headers,
+                client=client,
+                stream=stream,
+                json_mode=json_mode,
+                is_vertex_request=is_vertex_request,
+            )
+        validated_headers: Final = AnthropicConfig().validate_environment(
             api_key=api_key,
             headers=headers,
             model=model,
@@ -356,6 +374,117 @@ class AnthropicChatCompletion(BaseLLM):
             litellm_params=litellm_params,
             api_base=api_base,
         )
+        return self._dispatch_after_validation(
+            model=model,
+            messages=messages,
+            api_base=api_base,
+            custom_llm_provider=custom_llm_provider,
+            custom_prompt_dict=custom_prompt_dict,
+            model_response=model_response,
+            print_verbose=print_verbose,
+            encoding=encoding,
+            api_key=api_key,
+            logging_obj=logging_obj,
+            optional_params=optional_params,
+            timeout=timeout,
+            litellm_params=litellm_params,
+            logger_fn=logger_fn,
+            headers=validated_headers,
+            client=client,
+            acompletion=False,
+            stream=stream,
+            json_mode=json_mode,
+            is_vertex_request=is_vertex_request,
+        )
+
+    async def _acompletion_dispatch(
+        self,
+        *,
+        model: str,
+        messages: list,  # mutable-ok: mirrors the sync completion contract this parallels
+        api_base: str,
+        custom_llm_provider: str,
+        custom_prompt_dict: dict,  # mutable-ok: mirrors the sync completion contract this parallels
+        model_response: ModelResponse,
+        print_verbose: Callable,
+        encoding,
+        api_key,
+        logging_obj: "LiteLLMLoggingObj",
+        optional_params: dict,  # mutable-ok: mirrors the sync completion contract this parallels
+        timeout: float | httpx.Timeout,
+        litellm_params: dict,  # mutable-ok: mirrors the sync completion contract this parallels
+        logger_fn,
+        headers: dict,  # mutable-ok: mirrors the sync completion contract this parallels
+        client,
+        stream,
+        json_mode: bool,
+        is_vertex_request: bool,
+    ) -> "ModelResponse | CustomStreamWrapper":
+        """Async entry: await the workload identity token exchange off the event loop, then
+        run the shared post-validation dispatch. Mirrors the async hook the messages, files,
+        and batches surfaces already use so a first-request WIF mint or a mandatory refresh
+        never stalls the event loop while the token endpoint round-trips."""
+        validated_headers: Final = await AnthropicConfig().avalidate_environment(
+            api_key=api_key,
+            headers=headers,
+            model=model,
+            messages=messages,
+            optional_params={**optional_params, "is_vertex_request": is_vertex_request},
+            litellm_params=litellm_params,
+            api_base=api_base,
+        )
+        dispatched: Final = self._dispatch_after_validation(
+            model=model,
+            messages=messages,
+            api_base=api_base,
+            custom_llm_provider=custom_llm_provider,
+            custom_prompt_dict=custom_prompt_dict,
+            model_response=model_response,
+            print_verbose=print_verbose,
+            encoding=encoding,
+            api_key=api_key,
+            logging_obj=logging_obj,
+            optional_params=optional_params,
+            timeout=timeout,
+            litellm_params=litellm_params,
+            logger_fn=logger_fn,
+            headers=validated_headers,
+            client=client,
+            acompletion=True,
+            stream=stream,
+            json_mode=json_mode,
+            is_vertex_request=is_vertex_request,
+        )
+        return await dispatched
+
+    def _dispatch_after_validation(
+        self,
+        *,
+        model: str,
+        messages: list,  # mutable-ok: mirrors the sync completion contract this factors out
+        api_base: str,
+        custom_llm_provider: str,
+        custom_prompt_dict: dict,  # mutable-ok: mirrors the sync completion contract this factors out
+        model_response: ModelResponse,
+        print_verbose: Callable,
+        encoding,
+        api_key,
+        logging_obj: "LiteLLMLoggingObj",
+        optional_params: dict,  # mutable-ok: mirrors the sync completion contract this factors out
+        timeout: float | httpx.Timeout,
+        litellm_params: dict,  # mutable-ok: mirrors the sync completion contract this factors out
+        logger_fn,
+        headers: dict,  # mutable-ok: mirrors the sync completion contract this factors out
+        client,
+        acompletion: bool,
+        stream,
+        json_mode: bool,
+        is_vertex_request: bool,
+    ) -> "ModelResponse | CustomStreamWrapper | Coroutine[object, object, ModelResponse | CustomStreamWrapper]":
+        from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+        from litellm.utils import ProviderConfigManager
+
+        _is_function_call: Final = False
 
         config: Final = ProviderConfigManager.get_provider_chat_config(
             model=model,

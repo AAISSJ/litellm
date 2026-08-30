@@ -5,6 +5,7 @@ This file contains common utils for anthropic calls.
 import copy
 import re
 from collections.abc import Mapping, MutableMapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, ClassVar, Final, Literal
@@ -245,6 +246,27 @@ def _fetch_anthropic_model_ids(
             return collected
         cursor = page.last_id
     raise Exception(f"Anthropic /v1/models did not terminate within {_MODEL_LIST_PAGE_CAP} pages.")
+
+
+@dataclass(frozen=True, slots=True)
+class _AnthropicEnvironmentInputs:
+    """Static credential-resolution inputs shared by ``validate_environment`` and
+    ``avalidate_environment``. Splitting the sync and async variants around this
+    lets both paths run identical assembly and only diverge on the workload
+    identity token exchange, which is the sole blocking step in the sync hook.
+    """
+
+    headers: dict  # mutable-ok: mirrors the sync validate_environment header contract downstream helpers rebuild
+    api_key: str | None
+    auth_token: str | None
+    api_base: str | None
+    params_mapping: dict | None  # mutable-ok: mirrors the sync validate_environment litellm_params contract
+    use_bearer_for_custom_base: bool
+
+    @property
+    def needs_workload_identity(self) -> bool:
+        """True when no static credential is available and workload identity may mint one."""
+        return self.api_key is None and self.auth_token is None
 
 
 class AnthropicModelInfo(BaseLLMModelInfo):
@@ -875,27 +897,72 @@ class AnthropicModelInfo(BaseLLMModelInfo):
         api_key: str | None = None,
         api_base: str | None = None,
     ) -> dict:
+        prepared: Final = self._prepare_environment_inputs(headers, api_key, litellm_params, api_base)
+        wif_token: Final = (
+            get_anthropic_wif_token(prepared.params_mapping, prepared.api_base, model)
+            if prepared.needs_workload_identity and config_allows_workload_identity(self)
+            else None
+        )
+        return self._finalize_environment_headers(prepared, wif_token, model, messages, optional_params)
+
+    async def avalidate_environment(
+        self,
+        headers: dict,  # mutable-ok: mirrors the sync validate_environment contract this parallels
+        model: str,
+        messages: list[AllMessageValues],  # mutable-ok: mirrors the sync validate_environment contract this parallels
+        optional_params: dict,  # mutable-ok: mirrors the sync validate_environment contract this parallels
+        litellm_params: dict,  # mutable-ok: mirrors the sync validate_environment contract this parallels
+        api_key: str | None = None,
+        api_base: str | None = None,
+    ) -> dict:  # mutable-ok: mirrors the sync validate_environment contract this parallels
+        """Async counterpart of validate_environment: the workload identity token exchange
+        POSTs to the deployment host, so async callers await it instead of blocking a
+        worker thread on the sync hook."""
+        prepared: Final = self._prepare_environment_inputs(headers, api_key, litellm_params, api_base)
+        wif_token: Final = (
+            await aget_anthropic_wif_token(prepared.params_mapping, prepared.api_base, model)
+            if prepared.needs_workload_identity and config_allows_workload_identity(self)
+            else None
+        )
+        return self._finalize_environment_headers(prepared, wif_token, model, messages, optional_params)
+
+    def _prepare_environment_inputs(
+        self,
+        headers: dict,  # mutable-ok: mirrors the sync validate_environment contract this shares
+        api_key: str | None,
+        litellm_params: dict,  # mutable-ok: mirrors the sync validate_environment contract this shares
+        api_base: str | None,
+    ) -> "_AnthropicEnvironmentInputs":
         params_mapping: Final = litellm_params if isinstance(litellm_params, dict) else None
-        if api_base is None and params_mapping is not None:
-            api_base = params_mapping.get("api_base")
+        resolved_api_base: Final = (
+            api_base if api_base is not None else (params_mapping.get("api_base") if params_mapping else None)
+        )
         use_bearer_for_custom_base: Final[bool] = bool(
             params_mapping is not None and params_mapping.get("use_bearer_for_custom_base", False)
         )
-        # Check for Anthropic OAuth token in headers
-        headers, api_key = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key)
-        api_key = AnthropicModelInfo.get_api_key(api_key)
-        # Resolve auth_token from ANTHROPIC_AUTH_TOKEN if api_key is not set
-        auth_token: str | None = None
-        if api_key is None:
-            auth_token = AnthropicModelInfo.get_auth_token()
-        wif_token: Final = (
-            get_anthropic_wif_token(params_mapping, api_base, model)
-            if api_key is None and auth_token is None and config_allows_workload_identity(self)
-            else None
+        oauth_headers, oauth_api_key = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key)
+        resolved_api_key: Final = AnthropicModelInfo.get_api_key(oauth_api_key)
+        auth_token: Final = AnthropicModelInfo.get_auth_token() if resolved_api_key is None else None
+        return _AnthropicEnvironmentInputs(
+            headers=oauth_headers,
+            api_key=resolved_api_key,
+            auth_token=auth_token,
+            api_base=resolved_api_base,
+            params_mapping=params_mapping,
+            use_bearer_for_custom_base=use_bearer_for_custom_base,
         )
+
+    def _finalize_environment_headers(
+        self,
+        prepared: "_AnthropicEnvironmentInputs",
+        wif_token: str | None,
+        model: str,
+        messages: list[AllMessageValues],  # mutable-ok: mirrors the sync validate_environment contract this shares
+        optional_params: dict,  # mutable-ok: mirrors the sync validate_environment contract this shares
+    ) -> dict:  # mutable-ok: mirrors the sync validate_environment contract this shares
         wif_minted: Final = wif_token is not None
-        resolved_api_key: Final = wif_token if wif_token is not None else api_key
-        if resolved_api_key is None and auth_token is None:
+        resolved_api_key: Final = wif_token if wif_token is not None else prepared.api_key
+        if resolved_api_key is None and prepared.auth_token is None:
             raise litellm.AuthenticationError(
                 message=(
                     "Missing Anthropic API Key - A call is being made to anthropic but no key is set either in the "
@@ -923,14 +990,14 @@ class AnthropicModelInfo(BaseLLMModelInfo):
         code_execution_tool_used: Final = self.is_code_execution_tool_used(tools=tools)
         container_with_skills_used: Final = self.is_container_with_skills_used(optional_params=optional_params)
         user_anthropic_beta_headers: Final = self._get_user_anthropic_beta_headers(
-            anthropic_beta_header=headers.get("anthropic-beta")
+            anthropic_beta_header=prepared.headers.get("anthropic-beta")
         )
         anthropic_headers: Final = self.get_anthropic_headers(
             computer_tool_used=computer_tool_used,
             prompt_caching_set=prompt_caching_set,
             pdf_used=pdf_used,
             api_key=resolved_api_key,
-            auth_token=auth_token,
+            auth_token=prepared.auth_token,
             file_id_used=file_id_used,
             web_search_tool_used=web_search_tool_used,
             is_vertex_request=optional_params.get("is_vertex_request", False),
@@ -942,12 +1009,14 @@ class AnthropicModelInfo(BaseLLMModelInfo):
             effort_used=effort_used,
             code_execution_tool_used=code_execution_tool_used,
             container_with_skills_used=container_with_skills_used,
-            api_base=api_base,
-            use_bearer_for_custom_base=use_bearer_for_custom_base,
+            api_base=prepared.api_base,
+            use_bearer_for_custom_base=prepared.use_bearer_for_custom_base,
             wif_minted=wif_minted,
         )
 
-        caller_headers: Final = without_caller_credential_headers(headers) if wif_minted else headers
+        caller_headers: Final = (
+            without_caller_credential_headers(prepared.headers) if wif_minted else prepared.headers
+        )
 
         return {**caller_headers, **anthropic_headers}
 

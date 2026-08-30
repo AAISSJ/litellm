@@ -2375,3 +2375,62 @@ class TestRustChatCompletionsHook:
             "model": "m",
             "messages": [],
         }
+
+    @pytest.mark.asyncio
+    async def test_acompletion_resolves_wif_via_the_async_facade(self, monkeypatch):
+        """Regression: the chat acompletion path drove the WIF token exchange through
+        the sync ``get_anthropic_wif_token``, so a cold mint or mandatory refresh ran a
+        blocking HTTPS POST on the worker thread the completion coroutine was scheduled
+        from. The async entry must await ``aget_anthropic_wif_token`` instead, matching
+        what the messages, files, and batches surfaces already do."""
+        import threading as _threading
+
+        from litellm.llms.anthropic import common_utils as anthropic_common_utils
+        from litellm.llms.anthropic.chat.handler import AnthropicChatCompletion
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        for name in (
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_BASE",
+            "ANTHROPIC_BASE_URL",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl_chat")
+        monkeypatch.setenv("ANTHROPIC_ORGANIZATION_ID", "org-chat")
+        monkeypatch.setenv("ANTHROPIC_IDENTITY_TOKEN", "chat-inline-jwt")
+
+        minted = "sk-ant-oat01-chat-minted"
+        sync_calls: list[str] = []
+        async_thread_ids: list[int] = []
+
+        def sync_shim(_litellm_params, _api_base, model):
+            sync_calls.append(model)
+            return minted
+
+        async def async_shim(_litellm_params, _api_base, _model):
+            async_thread_ids.append(_threading.get_ident())
+            return minted
+
+        monkeypatch.setattr(anthropic_common_utils, "get_anthropic_wif_token", sync_shim)
+        monkeypatch.setattr(anthropic_common_utils, "aget_anthropic_wif_token", async_shim)
+
+        seen_headers: list[dict] = []
+
+        async def capture_and_return_sentinel(**kwargs):
+            seen_headers.append(kwargs["headers"])
+            return "sentinel"
+
+        with patch.object(
+            AnthropicConfig, "transform_request", return_value={"model": "m", "messages": []}
+        ), patch.object(
+            AnthropicChatCompletion, "acompletion_function", side_effect=capture_and_return_sentinel
+        ):
+            result = await AnthropicChatCompletion().completion(
+                **self._completion_kwargs(acompletion=True, litellm_params={}, api_key=None)
+            )
+
+        assert result == "sentinel"
+        assert sync_calls == [], "acompletion path must not call the sync WIF exchange"
+        assert async_thread_ids, "async WIF exchange should have been invoked"
+        assert seen_headers[0].get("authorization") == f"Bearer {minted}"
