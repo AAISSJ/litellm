@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
 import os
+import re
 import subprocess
 import sys
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Final
 
 
@@ -15,33 +17,74 @@ def main() -> int:
 
     wheel: Final = Path(sys.argv[1])
     with zipfile.ZipFile(wheel) as archive:
+        wheel_members: Final = archive.infolist()
         native_members: Final = tuple(
             member
-            for member in archive.infolist()
+            for member in wheel_members
             if member.filename.startswith("litellm/rust_bridge/_native.") and member.filename.endswith(".so")
         )
         if len(native_members) != 1:
             sys.stderr.write(f"expected one native extension, found {len(native_members)}\n")
             return 1
 
+        unexpected_members: Final = tuple(
+            member.filename
+            for member in wheel_members
+            if member.filename.endswith((".pdb", ".dwp", ".rlib", ".rmeta", "Cargo.toml", "Cargo.lock"))
+            or any(part.endswith(".dSYM") for part in PurePosixPath(member.filename).parts)
+        )
+        if unexpected_members:
+            sys.stderr.write(f"wheel contains unexpected build artifacts: {', '.join(unexpected_members)}\n")
+            return 1
+
         native_member: Final = native_members[0]
-        uncompressed_wheel_size: Final = sum(member.file_size for member in archive.infolist())
+        uncompressed_wheel_size: Final = sum(member.file_size for member in wheel_members)
         native_path: Final = wheel.parent / "native" / Path(native_member.filename).name
         native_path.parent.mkdir(parents=True, exist_ok=True)
         native_path.write_bytes(archive.read(native_member))
 
+    wheel_tags: Final = wheel.stem.rsplit("-", maxsplit=3)
+    if len(wheel_tags) != 4:
+        sys.stderr.write(f"cannot parse wheel tags from {wheel.name}\n")
+        return 1
+
+    python_tag: Final = wheel_tags[1]
+    abi_tag: Final = wheel_tags[2]
+    platform_tag: Final = wheel_tags[3]
     commit_sha: Final = os.environ.get("GITHUB_SHA", "unknown")
+    rustc_version: Final = subprocess.run(
+        ("rustc", "--version"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    pyproject: Final = (Path(__file__).parents[2] / "pyproject.toml").read_text()
+    maturin_match: Final = re.search(r'"maturin==([^";]+)', pyproject)
+    if maturin_match is None:
+        sys.stderr.write("build-system does not pin an exact Maturin version\n")
+        return 1
+
+    maturin_version: Final = maturin_match.group(1)
+    native_percentage: Final = native_member.file_size / uncompressed_wheel_size * 100
     size_report: Final = "\n".join(
         (
             "## Native wheel build report",
             "",
-            f"Built commit: `{commit_sha}`",
+            "| Build | Value |",
+            "| --- | --- |",
+            f"| Commit | `{commit_sha}` |",
+            f"| Platform | `{platform_tag}` |",
+            f"| Python ABI | `{python_tag}-{abi_tag}` |",
+            f"| Rust compiler | `{rustc_version}` |",
+            f"| Maturin | `{maturin_version}` |",
+            "| Cargo profile | `release` |",
             "",
             "| Artifact | Size |",
             "| --- | ---: |",
             f"| Compressed wheel | {wheel.stat().st_size / 1_000_000:.2f} MB |",
             f"| Uncompressed wheel | {uncompressed_wheel_size / 1_000_000:.2f} MB |",
             f"| Native extension | {native_member.file_size / 1_000_000:.2f} MB |",
+            f"| Native share | {native_percentage:.2f}% |",
             "",
         )
     )
@@ -57,13 +100,14 @@ def main() -> int:
         capture_output=True,
         text=True,
     ).stdout
-    forbidden_sections: Final = tuple(
-        section for section in (".symtab", ".debug_", ".zdebug_") if section in sections
-    )
-    if forbidden_sections:
+    debug_sections: Final = tuple(section for section in (".debug_", ".zdebug_") if section in sections)
+    if debug_sections:
         sys.stderr.write(
-            f"{native_member.filename} contains unstripped sections: {', '.join(forbidden_sections)}\n"
+            f"{native_member.filename} contains debug sections: {', '.join(debug_sections)}\n"
         )
+        return 1
+    if ".symtab" in sections:
+        sys.stderr.write(f"{native_member.filename} contains a static symbol table\n")
         return 1
 
     dynamic_symbols: Final = subprocess.run(
@@ -76,13 +120,23 @@ def main() -> int:
         sys.stderr.write("native extension does not export PyInit__native\n")
         return 1
 
+    module_spec: Final = importlib.util.spec_from_file_location("litellm.rust_bridge._native", native_path)
+    if module_spec is None or module_spec.loader is None:
+        sys.stderr.write("cannot create an import specification for the native extension\n")
+        return 1
+    native_module: Final = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(native_module)
+
     verified_report: Final = size_report + "\n".join(
         (
             "",
             "| Validation | Result |",
             "| --- | --- |",
-            "| ELF symbols | stripped |",
-            "| Python initializer | exported |",
+            "| Debug sections | absent |",
+            "| Static symbol table | absent |",
+            "| Python extension entry point | present |",
+            "| Native module load | passed |",
+            "| Wheel contents | passed |",
             "",
         )
     )
